@@ -1,0 +1,26 @@
+[workspace.package]
+edition = "2024"
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/backends",
+    "crates/vulkan-backend",
+    "crates/renderer",
+
+    "crates/engine",
+    "crates/editor",
+]
+default-members = [ "crates/editor" ]
+
+[workspace.dependencies]
+# Local crates
+backends = { version = "0.1.0", path = "./crates/backends" }
+vulkan-backend = { version = "0.1.0", path = "./crates/vulkan-backend" }
+
+engine131 = { version = "0.1.0", path = "./crates/engine" }
+renderer131 = { version = "0.1.0", path = "./crates/renderer" }
+
+# External libraries (dependencies)
+anyhow = "1.0.100"
+ash = "0.38.0"

@@ -1,0 +1,10 @@
+[package]
+name = "vulkan-backend"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+backends.workspace = true
+
+anyhow.workspace = true
+ash.workspace = true
