@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
-engine131.workspace = true
-renderer131.workspace = true
-
 anyhow.workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+engine131 = { workspace = true, features = [ "vulkan", "GLFW" ] }

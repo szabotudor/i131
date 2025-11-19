@@ -1,11 +1,15 @@
-#[derive(Debug)]
+use anyhow::Result;
+
+#[derive(Debug, Clone, Default)]
 pub struct BackendInfo {
     pub name: String,
 }
 
 pub trait Backend
 where
-    Self: Sized,
+    Self: std::fmt::Debug,
 {
-    fn info() -> BackendInfo;
+    fn info(self) -> BackendInfo;
+
+    fn init(&mut self) -> Result<()>;
 }

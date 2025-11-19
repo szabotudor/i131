@@ -1,6 +1,7 @@
 use anyhow::{Ok, Result};
 use backends::{Backend, BackendInfo};
 
+#[derive(Debug, Default)]
 pub struct VulkanBackend {}
 
 impl VulkanBackend {
@@ -10,9 +11,13 @@ impl VulkanBackend {
 }
 
 impl Backend for VulkanBackend {
-    fn info() -> BackendInfo {
+    fn info(self) -> BackendInfo {
         BackendInfo {
             name: "Vulkan".to_string(),
         }
+    }
+
+    fn init(&mut self) -> Result<()> {
+        todo!()
     }
 }

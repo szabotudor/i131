@@ -10,6 +10,7 @@ members = [
 
     "crates/engine",
     "crates/editor",
+    "crates/window",
 ]
 default-members = [ "crates/editor" ]
 
@@ -20,6 +21,7 @@ vulkan-backend = { version = "0.1.0", path = "./crates/vulkan-backend" }
 
 engine131 = { version = "0.1.0", path = "./crates/engine" }
 renderer131 = { version = "0.1.0", path = "./crates/renderer" }
+window131 = { version = "0.1.0", path = "./crates/window" }
 
 # External libraries (dependencies)
 anyhow = "1.0.100"

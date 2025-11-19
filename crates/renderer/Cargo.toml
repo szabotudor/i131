@@ -7,10 +7,10 @@ edition.workspace = true
 backends.workspace = true
 vulkan-backend = { workspace = true, optional = true }
 
+window131 = { workspace = true }
+
 anyhow.workspace = true
 
 [features]
-vulkan = [ "dep:vulkan-backend" ]
-
-# TODO: No backend should be ebabled by default, unless it's supported on the platform being built
-default = ["vulkan"]
+vulkan = [ "vulkan-backend" ]
+GLFW = [ "window131/GLFW" ]

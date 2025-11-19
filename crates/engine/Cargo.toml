@@ -5,5 +5,10 @@ edition.workspace = true
 
 [dependencies]
 renderer131.workspace = true
+window131.workspace = true
 
 anyhow.workspace = true
+
+[features]
+vulkan = [ "renderer131/vulkan" ]
+GLFW = [ "window131/GLFW", "renderer131/GLFW"]
