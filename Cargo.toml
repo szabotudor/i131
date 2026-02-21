@@ -9,10 +9,9 @@ members = [
     "crates/renderer",
 
     "crates/engine",
-    "crates/editor",
+    "crates/math",
     "crates/window",
 ]
-default-members = [ "crates/editor" ]
 
 [workspace.dependencies]
 # Local crates
@@ -20,6 +19,7 @@ backends = { version = "0.1.0", path = "./crates/backends" }
 vulkan-backend = { version = "0.1.0", path = "./crates/vulkan-backend" }
 
 engine131 = { version = "0.1.0", path = "./crates/engine" }
+math131 = { version = "0.1.0", path = "./crates/math" }
 renderer131 = { version = "0.1.0", path = "./crates/renderer" }
 window131 = { version = "0.1.0", path = "./crates/window" }
 
