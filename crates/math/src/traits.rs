@@ -1,7 +1,7 @@
-pub struct VectorBaseType<T> {
+pub struct _VectorBaseHelper<T> {
     _t: T,
 }
-pub trait VectorBaseData<const SIZE: usize> {
+pub trait IsVectorBase<const SIZE: usize> {
     type Vector;
 }
 
@@ -9,6 +9,6 @@ pub trait VectorBaseStorage<T, const SIZE: usize>
 where
     Self: Sized,
 {
-    fn data(&self) -> &[T; SIZE];
-    fn data_mut(&mut self) -> &mut [T; SIZE];
+    fn read<const N: usize>(&self) -> T;
+    fn write<const N: usize>(&mut self, v: T);
 }

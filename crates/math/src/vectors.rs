@@ -4,23 +4,22 @@ use std::{
 };
 
 use super::traits::*;
-use crate::base_vectors::*;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Vector<T, const SIZE: usize>
 where
-    VectorBaseType<T>: VectorBaseData<SIZE>,
-    <VectorBaseType<T> as VectorBaseData<SIZE>>::Vector: VectorBaseStorage<T, SIZE> + Clone + Copy,
+    _VectorBaseHelper<T>: IsVectorBase<SIZE>,
+    <_VectorBaseHelper<T> as IsVectorBase<SIZE>>::Vector: VectorBaseStorage<T, SIZE> + Clone + Copy,
 {
-    _v: <VectorBaseType<T> as VectorBaseData<SIZE>>::Vector,
+    _v: <_VectorBaseHelper<T> as IsVectorBase<SIZE>>::Vector,
 }
 
 impl<'a, T, const SIZE: usize> Default for Vector<T, SIZE>
 where
-    VectorBaseType<T>: VectorBaseData<SIZE>,
+    _VectorBaseHelper<T>: IsVectorBase<SIZE>,
     T: Default,
-    <VectorBaseType<T> as VectorBaseData<SIZE>>::Vector:
+    <_VectorBaseHelper<T> as IsVectorBase<SIZE>>::Vector:
         Default + VectorBaseStorage<T, SIZE> + Clone + Copy,
 {
     fn default() -> Self {
@@ -32,10 +31,10 @@ where
 
 impl<'a, T, const SIZE: usize> Deref for Vector<T, SIZE>
 where
-    VectorBaseType<T>: VectorBaseData<SIZE>,
-    <VectorBaseType<T> as VectorBaseData<SIZE>>::Vector: VectorBaseStorage<T, SIZE> + Clone + Copy,
+    _VectorBaseHelper<T>: IsVectorBase<SIZE>,
+    <_VectorBaseHelper<T> as IsVectorBase<SIZE>>::Vector: VectorBaseStorage<T, SIZE> + Clone + Copy,
 {
-    type Target = <VectorBaseType<T> as VectorBaseData<SIZE>>::Vector;
+    type Target = <_VectorBaseHelper<T> as IsVectorBase<SIZE>>::Vector;
 
     fn deref(&self) -> &Self::Target {
         &self._v
@@ -43,8 +42,8 @@ where
 }
 impl<'a, T, const SIZE: usize> DerefMut for Vector<T, SIZE>
 where
-    VectorBaseType<T>: VectorBaseData<SIZE>,
-    <VectorBaseType<T> as VectorBaseData<SIZE>>::Vector: VectorBaseStorage<T, SIZE> + Clone + Copy,
+    _VectorBaseHelper<T>: IsVectorBase<SIZE>,
+    <_VectorBaseHelper<T> as IsVectorBase<SIZE>>::Vector: VectorBaseStorage<T, SIZE> + Clone + Copy,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self._v
@@ -53,8 +52,8 @@ where
 
 impl<'a, T, const SIZE: usize> Debug for Vector<T, SIZE>
 where
-    VectorBaseType<T>: VectorBaseData<SIZE>,
-    <VectorBaseType<T> as VectorBaseData<SIZE>>::Vector:
+    _VectorBaseHelper<T>: IsVectorBase<SIZE>,
+    <_VectorBaseHelper<T> as IsVectorBase<SIZE>>::Vector:
         VectorBaseStorage<T, SIZE> + Clone + Copy + Debug,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -62,13 +61,36 @@ where
     }
 }
 
-pub type Vec2f32<'a> = Vector<f32, 2>;
-pub type Vec2f64<'a> = Vector<f64, 2>;
-pub type Vec2u8 = Vector2Base<u8>;
-pub type Vec2i8 = Vector2Base<i8>;
-pub type Vec2u16 = Vector2Base<u16>;
-pub type Vec2i16 = Vector2Base<i16>;
-pub type Vec2u32 = Vector2Base<u32>;
-pub type Vec2i32 = Vector2Base<i32>;
-pub type Vec2u64 = Vector2Base<u64>;
-pub type Vec2i64 = Vector2Base<i64>;
+macro_rules! vec_shortcut {
+    {$name:ident, $base:ty, $size:expr} => {
+        #[repr(transparent)]
+        pub struct $name { _v: Vector<$base, $size> }
+        impl Deref for $name {
+            type Target = Vector<$base, $size>;
+            fn deref(&self) -> &Self::Target {
+                &self._v
+            }
+        }
+        impl DerefMut for $name {
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                &mut self._v
+            }
+        }
+        impl Default for $name where Vector<$base, $size>: Default {
+            fn default() -> Self {
+                Self { _v: Default::default() }
+            }
+        }
+    };
+}
+
+vec_shortcut! {Vec2f32, f32, 2}
+vec_shortcut! {Vec2f64, f64, 2}
+vec_shortcut! {Vec2u8, u8, 2}
+vec_shortcut! {Vec2i8, i8, 2}
+vec_shortcut! {Vec2u16, u16, 2}
+vec_shortcut! {Vec2i16, i16, 2}
+vec_shortcut! {Vec2u32, u32, 2}
+vec_shortcut! {Vec2i32, i32, 2}
+vec_shortcut! {Vec2u64, u64, 2}
+vec_shortcut! {Vec2i64, i64, 2}
