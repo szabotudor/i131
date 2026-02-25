@@ -3,12 +3,15 @@ use anyhow::Result;
 #[derive(Debug, Clone)]
 pub struct WindowSettings {
     pub title: String,
+    pub size: Vector<u32, 2>,
 }
 
 impl Default for WindowSettings {
     fn default() -> Self {
+        let size = Vector::<u32, 2>::default();
         Self {
             title: "Engine131".to_string(),
+            size,
         }
     }
 }
@@ -21,9 +24,9 @@ pub struct Window {
     data: WindowDataGLFW,
 }
 
-impl Window {
-    #[cfg(feature = "GLFW")]
-    pub fn new(settings: WindowSettings) -> Result<Self> {
-        todo!()
-    }
-}
+#[cfg(feature = "GLFW")]
+pub mod glfw_manager;
+#[cfg(feature = "GLFW")]
+pub use glfw_manager::*;
+
+use math131::Vector;

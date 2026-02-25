@@ -1,5 +1,5 @@
 use anyhow::{Ok, Result};
-use backends::BackendInfo;
+use backends::{Backend, BackendInfo};
 use window131::Window;
 
 #[cfg(feature = "vulkan")]
