@@ -1,3 +1,4 @@
+mod math;
 #[cfg(feature = "swizzle")]
 mod swizzles;
 mod vectors;

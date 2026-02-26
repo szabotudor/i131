@@ -1,6 +1,8 @@
 use std::{
+    array::IntoIter,
     fmt::Debug,
-    ops::{Deref, DerefMut},
+    ops::{Deref, DerefMut, Index, IndexMut},
+    slice::{Iter, IterMut},
 };
 
 //===============
@@ -60,6 +62,50 @@ where
         Self {
             data: self.data.clone(),
         }
+    }
+}
+impl<T, const SIZE: usize> Copy for Vector<T, SIZE>
+where
+    [T; SIZE]: Copy,
+    T: Copy,
+{
+}
+
+impl<'a, T, const SIZE: usize> IntoIterator for &'a Vector<T, SIZE> {
+    type Item = &'a T;
+    type IntoIter = Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.data.iter()
+    }
+}
+impl<'a, T, const SIZE: usize> IntoIterator for &'a mut Vector<T, SIZE> {
+    type Item = &'a mut T;
+    type IntoIter = IterMut<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.data.iter_mut()
+    }
+}
+impl<T, const SIZE: usize> IntoIterator for Vector<T, SIZE> {
+    type Item = T;
+    type IntoIter = IntoIter<T, SIZE>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        IntoIterator::into_iter(self.data)
+    }
+}
+
+impl<T, const SIZE: usize> Index<usize> for Vector<T, SIZE> {
+    type Output = T;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.data[index]
+    }
+}
+impl<T, const SIZE: usize> IndexMut<usize> for Vector<T, SIZE> {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        &mut self.data[index]
     }
 }
 
