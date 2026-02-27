@@ -25,6 +25,17 @@ where
     }
 }
 
+impl<T, const SIZE: usize> From<T> for Vector<T, SIZE>
+where
+    T: Copy,
+{
+    fn from(value: T) -> Self {
+        Self {
+            data: std::array::from_fn(|_| value),
+        }
+    }
+}
+
 impl<T, const SIZE: usize> Debug for Vector<T, SIZE>
 where
     T: Debug,
