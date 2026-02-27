@@ -11,6 +11,7 @@ members = [
     "crates/engine",
     "crates/math",
     "crates/window",
+    "crates/editor",
 ]
 
 [workspace.dependencies]
@@ -22,6 +23,8 @@ engine131 = { version = "0.1.0", path = "./crates/engine" }
 math131 = { version = "0.1.0", path = "./crates/math" }
 renderer131 = { version = "0.1.0", path = "./crates/renderer" }
 window131 = { version = "0.1.0", path = "./crates/window" }
+
+editor131 = { version = "0.1.0", path = "./crates/editor" }
 
 # External libraries (dependencies)
 anyhow = "1.0.100"
