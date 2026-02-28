@@ -20,7 +20,7 @@ backends = { version = "0.1.0", path = "./crates/backends" }
 vulkan-backend = { version = "0.1.0", path = "./crates/vulkan-backend" }
 
 engine131 = { version = "0.1.0", path = "./crates/engine" }
-math131 = { version = "0.1.0", path = "./crates/math" }
+math131 = { version = "0.1.0", path = "./crates/math", features = [ "SIMD" ] }
 renderer131 = { version = "0.1.0", path = "./crates/renderer" }
 window131 = { version = "0.1.0", path = "./crates/window" }
 

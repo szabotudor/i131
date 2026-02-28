@@ -14,6 +14,12 @@ pub struct Vector<T, const SIZE: usize> {
     pub(crate) data: [T; SIZE],
 }
 
+impl Vector<f32, 4> {
+    pub fn new(x: f32, y: f32, z: f32, w: f32) -> Self {
+        Self { data: [x, y, z, w] }
+    }
+}
+
 impl<T, const SIZE: usize> Default for Vector<T, SIZE>
 where
     [T; SIZE]: Default,
@@ -134,12 +140,12 @@ impl<T> Deref for Vector<T, 2> {
     type Target = Vector2Storage<T>;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { &*(&self.data as *const T as *const Self::Target) }
+        unsafe { std::mem::transmute(self) }
     }
 }
 impl<T> DerefMut for Vector<T, 2> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *(&mut self.data as *mut T as *mut Self::Target) }
+        unsafe { std::mem::transmute(self) }
     }
 }
 
@@ -154,12 +160,12 @@ impl<T> Deref for Vector<T, 3> {
     type Target = Vector3Storage<T>;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { &*(&self.data as *const T as *const Self::Target) }
+        unsafe { std::mem::transmute(self) }
     }
 }
 impl<T> DerefMut for Vector<T, 3> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *(&mut self.data as *mut T as *mut Self::Target) }
+        unsafe { std::mem::transmute(self) }
     }
 }
 
@@ -175,18 +181,68 @@ impl<T> Deref for Vector<T, 4> {
     type Target = Vector4Storage<T>;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { &*(&self.data as *const T as *const Self::Target) }
+        unsafe { std::mem::transmute(self) }
     }
 }
 impl<T> DerefMut for Vector<T, 4> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *(&mut self.data as *mut T as *mut Self::Target) }
+        unsafe { std::mem::transmute(self) }
     }
 }
 
 //================
 // Common Vectors
 //================
+
+pub trait ScalarOp {}
+#[cfg(feature = "SIMD")]
+pub trait SIMDOp {}
+
+#[cfg(not(feature = "SIMD"))]
+impl<T, const SIZE: usize> ScalarOp for Vector<T, SIZE> {}
+
+#[cfg(feature = "SIMD")]
+mod simd {
+    use crate::*;
+
+    // SIMD vectors
+    impl SIMDOp for Vec4f32 {}
+
+    // Non-SIMD (scalar) vectors
+    impl ScalarOp for Vec2f32 {}
+    impl ScalarOp for Vec3f32 {}
+
+    impl ScalarOp for Vec2f64 {}
+    impl ScalarOp for Vec3f64 {}
+    impl ScalarOp for Vec4f64 {}
+
+    impl ScalarOp for Vec2u8 {}
+    impl ScalarOp for Vec2i8 {}
+    impl ScalarOp for Vec2u16 {}
+    impl ScalarOp for Vec2i16 {}
+    impl ScalarOp for Vec2u32 {}
+    impl ScalarOp for Vec2i32 {}
+    impl ScalarOp for Vec2u64 {}
+    impl ScalarOp for Vec2i64 {}
+
+    impl ScalarOp for Vec3u8 {}
+    impl ScalarOp for Vec3i8 {}
+    impl ScalarOp for Vec3u16 {}
+    impl ScalarOp for Vec3i16 {}
+    impl ScalarOp for Vec3u32 {}
+    impl ScalarOp for Vec3i32 {}
+    impl ScalarOp for Vec3u64 {}
+    impl ScalarOp for Vec3i64 {}
+
+    impl ScalarOp for Vec4u8 {}
+    impl ScalarOp for Vec4i8 {}
+    impl ScalarOp for Vec4u16 {}
+    impl ScalarOp for Vec4i16 {}
+    impl ScalarOp for Vec4u32 {}
+    impl ScalarOp for Vec4i32 {}
+    impl ScalarOp for Vec4u64 {}
+    impl ScalarOp for Vec4i64 {}
+}
 
 pub type Vec2f32 = Vector<f32, 2>;
 pub type Vec2f64 = Vector<f64, 2>;
