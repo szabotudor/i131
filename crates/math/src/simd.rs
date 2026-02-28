@@ -1,8 +1,7 @@
-use crate::{Vec4f32, Vector2Storage, Vector3Storage, Vector4Storage};
+use crate::Vec4f32;
 use std::{
-    arch::x86_64::{_mm_add_ps, _mm_div_ps, _mm_loadu_ps, _mm_mul_ps, _mm_storeu_ps, _mm_sub_ps},
-    fmt::Debug,
-    ops::{Add, AddAssign, Deref, DerefMut, Div, DivAssign, Mul, MulAssign, Sub, SubAssign},
+    arch::x86_64::{_mm_add_ps, _mm_div_ps, _mm_mul_ps, _mm_sub_ps},
+    ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign},
 };
 
 //=============

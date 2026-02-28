@@ -5,6 +5,4 @@ mod simd;
 mod swizzles;
 mod vectors;
 
-#[cfg(feature = "SIMD")]
-pub use simd::*;
 pub use vectors::*;
