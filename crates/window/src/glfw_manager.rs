@@ -1,4 +1,11 @@
 use anyhow::Result;
+use glfw::{Context, Glfw, GlfwReceiver, PWindow, WindowEvent};
+
+pub struct WindowDataGLFW {
+    glfw: Glfw,
+    window: PWindow,
+    events: GlfwReceiver<(f64, WindowEvent)>,
+}
 
 impl super::Window {
     fn glfw_error_callback(error: glfw::Error, message: String) {
@@ -7,7 +14,45 @@ impl super::Window {
 
     pub fn new(settings: super::WindowSettings) -> Result<Self> {
         let mut glfw = glfw::init(Self::glfw_error_callback)?;
+        let Some((window, events)) = glfw.create_window(
+            settings.size.x,
+            settings.size.y,
+            settings.title.as_str(),
+            glfw::WindowMode::Windowed,
+        ) else {
+            return Err(anyhow::anyhow!("Failed to create GLFW window"));
+        };
 
-        todo!()
+        let data = WindowDataGLFW {
+            glfw,
+            window,
+            events,
+        };
+
+        Ok(Self {
+            data,
+            should_close: false,
+        })
+    }
+
+    pub fn should_close(&self) -> bool {
+        self.should_close || self.data.window.should_close()
+    }
+
+    pub fn update(&mut self) {
+        self.data.window.make_current();
+        self.data.window.swap_buffers();
+        self.data.glfw.poll_events();
+
+        for (_e, event) in glfw::flush_messages(&self.data.events) {
+            match event {
+                glfw::WindowEvent::Close => {
+                    self.should_close = true;
+                }
+                _ => {}
+            }
+        }
+
+        glfw::make_context_current(None);
     }
 }
