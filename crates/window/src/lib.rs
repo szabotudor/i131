@@ -24,6 +24,12 @@ impl Default for WindowSettings {
 }
 
 impl WindowSettings {
+    pub fn new() -> Self {
+        Default::default()
+    }
+}
+
+impl WindowSettings {
     pub fn with_title(mut self, title: String) -> Self {
         self.title = title;
         self
