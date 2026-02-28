@@ -14,8 +14,18 @@ pub struct Vector<T, const SIZE: usize> {
     pub(crate) data: [T; SIZE],
 }
 
-impl Vector<f32, 4> {
-    pub fn new(x: f32, y: f32, z: f32, w: f32) -> Self {
+impl<T> Vector<T, 2> {
+    pub fn new(x: T, y: T) -> Self {
+        Self { data: [x, y] }
+    }
+}
+impl<T> Vector<T, 3> {
+    pub fn new(x: T, y: T, z: T) -> Self {
+        Self { data: [x, y, z] }
+    }
+}
+impl<T> Vector<T, 4> {
+    pub fn new(x: T, y: T, z: T, w: T) -> Self {
         Self { data: [x, y, z, w] }
     }
 }
