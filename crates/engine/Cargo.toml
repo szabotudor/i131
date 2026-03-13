@@ -11,5 +11,4 @@ window131.workspace = true
 anyhow.workspace = true
 
 [features]
-vulkan = [ "renderer131/vulkan" ]
-GLFW = [ "window131/GLFW", "renderer131/GLFW"]
+GLFW = [ "window131/GLFW" ]

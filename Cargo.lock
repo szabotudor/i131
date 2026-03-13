@@ -123,13 +123,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backends"
-version = "0.1.0"
-dependencies = [
- "anyhow",
-]
-
-[[package]]
 name = "bit_field"
 version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -266,8 +259,7 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 name = "editor131"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "engine131",
+ "math131",
 ]
 
 [[package]]
@@ -897,8 +889,6 @@ name = "renderer131"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "backends",
- "vulkan-backend",
  "window131",
 ]
 
@@ -1010,12 +1000,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "vulkan-backend"
+name = "vulkan-renderer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "ash",
- "backends",
+ "renderer131",
 ]
 
 [[package]]

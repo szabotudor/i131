@@ -4,13 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
-backends.workspace = true
-vulkan-backend = { workspace = true, optional = true }
-
 window131 = { workspace = true }
 
 anyhow.workspace = true
 
-[features]
-vulkan = [ "vulkan-backend" ]
-GLFW = [ "window131/GLFW" ]
