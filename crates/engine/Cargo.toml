@@ -9,6 +9,7 @@ renderer131.workspace = true
 window131.workspace = true
 
 anyhow.workspace = true
+thiserror.workspace = true
 
 [features]
 GLFW = [ "window131/GLFW" ]
