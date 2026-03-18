@@ -1,6 +1,6 @@
 use std::{
     fmt::Debug,
-    sync::{Arc, Condvar, Mutex, PoisonError, Weak},
+    sync::{Arc, Mutex, PoisonError, Weak, atomic::Ordering},
     thread::JoinHandle,
 };
 
@@ -77,59 +77,27 @@ struct SystemThreadData {
 }
 
 #[derive(Default)]
-struct SystemManagerCommonData {
-    ready: bool,
-    running: bool,
-    engine: Weak<I131>,
-}
-
-#[derive(Default, Debug)]
-struct CondvarDataTuple<T> {
-    data: Mutex<T>,
-    cond: Condvar,
-}
-
-#[derive(Default)]
 pub struct SystemManager {
-    common_data: Arc<CondvarDataTuple<SystemManagerCommonData>>,
     thread_data: Vec<Arc<Mutex<SystemThreadData>>>,
     threads: Vec<JoinHandle<Result<(), SystemError>>>,
+    engine: Weak<I131>,
 }
 
 impl SystemManager {
     pub fn new(engine: Weak<I131>) -> Self {
         Self {
-            common_data: Arc::new(CondvarDataTuple {
-                data: Mutex::new(SystemManagerCommonData {
-                    ready: false,
-                    running: false,
-                    engine,
-                }),
-                cond: Default::default(),
-            }),
             thread_data: Default::default(),
             threads: Default::default(),
+            engine,
         }
-    }
-
-    pub(crate) fn is_ready(&self) -> Result<bool, SystemError> {
-        Ok(self.common_data.data.lock()?.ready)
-    }
-    pub(crate) fn mark_ready(&self) -> Result<(), SystemError> {
-        let mut common_data = self.common_data.data.lock()?;
-        common_data.ready = true;
-
-        Ok(())
     }
 
     fn worker_tick(
         thread_data_mutex: &Arc<Mutex<SystemThreadData>>,
         engine: &Weak<I131>,
-    ) -> Result<(), SystemError> {
+    ) -> Result<bool, SystemError> {
         let mut thread_data = thread_data_mutex.lock()?;
-        let Some(engine) = engine.upgrade() else {
-            return Err(SystemError::InvalidEngine);
-        };
+        let engine = engine.upgrade().ok_or(SystemError::InvalidEngine)?;
 
         for system in &mut thread_data.systems {
             if !system.initialized {
@@ -138,7 +106,7 @@ impl SystemManager {
             }
         }
 
-        Ok(())
+        Ok(engine.running.load(Ordering::Relaxed))
     }
 
     /// Create a worker thread to handle system update functions
@@ -155,24 +123,20 @@ impl SystemManager {
 
         let thread_data_mutex = self.thread_data.last().unwrap().clone();
         let last_thread_data = self.thread_data.last().unwrap().clone();
-        let common_data_condvar = self.common_data.clone();
+        let engine = self.engine.clone();
 
         let worker_thread_fn = || -> Result<(), SystemError> {
             let thread_data_mutex = thread_data_mutex;
-            let common_data_condvar = common_data_condvar;
+            let engine = engine;
 
-            let common_data = common_data_condvar
-                .cond
-                .wait_while(common_data_condvar.data.lock()?, |d| !d.ready)?;
-
-            let mut running = common_data.running;
-            let engine = common_data.engine.clone();
-
-            drop(common_data);
+            let mut running = engine
+                .upgrade()
+                .ok_or(SystemError::InvalidEngine)?
+                .running
+                .load(Ordering::Relaxed);
 
             while running {
-                Self::worker_tick(&thread_data_mutex, &engine)?;
-                running = common_data_condvar.data.lock()?.running;
+                running = Self::worker_tick(&thread_data_mutex, &engine)?;
             }
 
             Ok(())
