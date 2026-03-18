@@ -15,7 +15,7 @@ members = [
 
 [workspace.dependencies]
 # Local crates
-vulkan-backend = { version = "0.1.0", path = "./crates/vulkan-renderer" }
+vulkan-renderer = { version = "0.1.0", path = "./crates/vulkan-renderer" }
 
 engine131 = { version = "0.1.0", path = "./crates/engine" }
 math131 = { version = "0.1.0", path = "./crates/math", features = [ "SIMD" ] }
