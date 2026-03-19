@@ -1,6 +1,6 @@
 use std::{
     fmt::Debug,
-    sync::{Arc, Mutex, PoisonError, Weak, atomic::Ordering},
+    sync::{Arc, Mutex, PoisonError, RwLock, Weak},
     thread::JoinHandle,
 };
 
@@ -33,7 +33,7 @@ impl<T> From<PoisonError<T>> for SystemError {
     }
 }
 
-pub trait System: Send {
+pub trait System: Send + Sync {
     /// Static name of the system
     fn name(&self) -> &'static str;
 
@@ -73,7 +73,7 @@ struct SystemBox {
 
 struct SystemThreadData {
     name: String,
-    systems: Vec<SystemBox>,
+    systems: Vec<Arc<RwLock<SystemBox>>>,
 }
 
 #[derive(Default)]
@@ -96,17 +96,19 @@ impl SystemManager {
         thread_data_mutex: &Arc<Mutex<SystemThreadData>>,
         engine: &Weak<I131>,
     ) -> Result<bool, SystemError> {
-        let mut thread_data = thread_data_mutex.lock()?;
+        let mut systems = thread_data_mutex.lock()?.systems.clone();
         let engine = engine.upgrade().ok_or(SystemError::InvalidEngine)?;
 
-        for system in &mut thread_data.systems {
+        for system_arc in &mut systems {
+            let mut system = system_arc.write()?;
             if !system.initialized {
                 system.system.initialize(&engine)?;
                 system.initialized = true;
             }
+            // TODO: system update and begin/end play
         }
 
-        Ok(engine.running.load(Ordering::Relaxed))
+        Ok(engine.state.lock()?.running)
     }
 
     /// Create a worker thread to handle system update functions
@@ -129,11 +131,13 @@ impl SystemManager {
             let thread_data_mutex = thread_data_mutex;
             let engine = engine;
 
-            let mut running = engine
-                .upgrade()
-                .ok_or(SystemError::InvalidEngine)?
-                .running
-                .load(Ordering::Relaxed);
+            let engine_arc = engine.upgrade().ok_or(SystemError::InvalidEngine)?;
+            let state = engine_arc.state.wait_while(|state| !state.ready)?;
+
+            let mut running = state.running;
+
+            drop(state);
+            drop(engine_arc);
 
             while running {
                 running = Self::worker_tick(&thread_data_mutex, &engine)?;
@@ -171,17 +175,19 @@ impl SystemManager {
                 })
                 .transpose()?
             {
-                existing.systems.push(SystemBox {
+                existing.systems.push(Arc::new(RwLock::new(SystemBox {
                     system: Box::new(sys),
                     initialized: false,
-                });
+                })));
             } else {
                 let new_thread_data = self.create_worker_thread(thread_name)?;
                 let mut new_thread_data = new_thread_data.lock()?;
-                new_thread_data.systems.push(SystemBox {
-                    system: Box::new(sys),
-                    initialized: false,
-                });
+                new_thread_data
+                    .systems
+                    .push(Arc::new(RwLock::new(SystemBox {
+                        system: Box::new(sys),
+                        initialized: false,
+                    })));
             }
         }
         Ok(())
