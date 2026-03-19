@@ -69,6 +69,7 @@ pub trait System: Send + Sync {
 struct SystemBox {
     system: Box<dyn System>,
     initialized: bool,
+    playing: bool,
 }
 
 struct SystemThreadData {
@@ -98,6 +99,7 @@ impl SystemManager {
     ) -> Result<bool, SystemError> {
         let mut systems = thread_data_mutex.lock()?.systems.clone();
         let engine = engine.upgrade().ok_or(SystemError::InvalidEngine)?;
+        let tick_initial_state = engine.state.lock()?.clone();
 
         for system_arc in &mut systems {
             let mut system = system_arc.write()?;
@@ -105,7 +107,12 @@ impl SystemManager {
                 system.system.initialize(&engine)?;
                 system.initialized = true;
             }
-            // TODO: system update and begin/end play
+
+            if tick_initial_state.playing && !system.playing {
+                system.system.begin_play(&engine)?;
+            }
+
+            system.system.update(0.0, &engine)?;
         }
 
         Ok(engine.state.lock()?.running)
@@ -178,6 +185,7 @@ impl SystemManager {
                 existing.systems.push(Arc::new(RwLock::new(SystemBox {
                     system: Box::new(sys),
                     initialized: false,
+                    playing: false,
                 })));
             } else {
                 let new_thread_data = self.create_worker_thread(thread_name)?;
@@ -187,6 +195,7 @@ impl SystemManager {
                     .push(Arc::new(RwLock::new(SystemBox {
                         system: Box::new(sys),
                         initialized: false,
+                        playing: false,
                     })));
             }
         }

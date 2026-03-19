@@ -8,10 +8,11 @@ pub use window131;
 
 use crate::systems::{SystemError, SystemManager};
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct EngineState {
     pub ready: bool,
     pub running: bool,
+    pub playing: bool,
 }
 pub struct EngineStateHandler {
     mutex: Mutex<EngineState>,
