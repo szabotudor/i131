@@ -49,10 +49,10 @@ pub trait System: Send + Sync {
     fn begin_play(&mut self, engine: &I131) -> Result<(), SystemError>;
 
     /// Called every frame during play
-    fn update(&mut self, delta: f32, engine: &I131) -> Result<(), SystemError>;
+    fn update(&mut self, delta_seconds: f32, engine: &I131) -> Result<(), SystemError>;
 
     /// Called every frame outside of play while the editor is enabled and running
-    fn editor_update(&mut self, delta: f32, engine: &I131) -> Result<(), SystemError>;
+    fn editor_update(&mut self, delta_seconds: f32, engine: &I131) -> Result<(), SystemError>;
 
     /// Called as the game ends
     ///
