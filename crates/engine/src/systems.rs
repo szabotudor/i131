@@ -2,6 +2,7 @@ use std::{
     fmt::Debug,
     sync::{Arc, Mutex, PoisonError, RwLock, Weak},
     thread::JoinHandle,
+    time::Instant,
 };
 
 use crate::I131;
@@ -70,6 +71,8 @@ struct SystemBox {
     system: Box<dyn System>,
     initialized: bool,
     playing: bool,
+    last_update: Instant,
+    should_be_destroyed: bool,
 }
 
 struct SystemThreadData {
@@ -97,11 +100,14 @@ impl SystemManager {
         thread_data_mutex: &Arc<Mutex<SystemThreadData>>,
         engine: &Weak<I131>,
     ) -> Result<bool, SystemError> {
-        let mut systems = thread_data_mutex.lock()?.systems.clone();
         let engine = engine.upgrade().ok_or(SystemError::InvalidEngine)?;
         let tick_initial_state = engine.state.lock()?.clone();
 
-        for system_arc in &mut systems {
+        let systems = thread_data_mutex.lock()?.systems.clone();
+
+        let mut systems_to_remove = Vec::new();
+
+        for (i, system_arc) in &mut systems.iter().enumerate() {
             let mut system = system_arc.write()?;
             if !system.initialized {
                 system.system.initialize(&engine)?;
@@ -110,9 +116,35 @@ impl SystemManager {
 
             if tick_initial_state.playing && !system.playing {
                 system.system.begin_play(&engine)?;
+                system.playing = true;
             }
 
-            system.system.update(0.0, &engine)?;
+            if system.should_be_destroyed {
+                if system.playing {
+                    system.system.end_play(&engine)?;
+                }
+                system.system.destroy(&engine)?;
+
+                systems_to_remove.push(i);
+                continue;
+            }
+
+            let now = Instant::now();
+            let delta_seconds = (now - system.last_update).as_secs_f32();
+            system.last_update = now;
+            system.system.update(delta_seconds, &engine)?;
+
+            if !tick_initial_state.playing && system.playing {
+                system.system.end_play(&engine)?;
+                system.playing = false;
+            }
+        }
+
+        if !systems_to_remove.is_empty() {
+            let systems = &mut thread_data_mutex.lock()?.systems;
+            for i in systems_to_remove.into_iter().rev() {
+                systems.swap_remove(i);
+            }
         }
 
         Ok(engine.state.lock()?.running)
@@ -186,6 +218,8 @@ impl SystemManager {
                     system: Box::new(sys),
                     initialized: false,
                     playing: false,
+                    last_update: Instant::now(),
+                    should_be_destroyed: false,
                 })));
             } else {
                 let new_thread_data = self.create_worker_thread(thread_name)?;
@@ -196,6 +230,8 @@ impl SystemManager {
                         system: Box::new(sys),
                         initialized: false,
                         playing: false,
+                        last_update: Instant::now(),
+                        should_be_destroyed: false,
                     })));
             }
         }
