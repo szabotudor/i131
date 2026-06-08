@@ -7,5 +7,5 @@ edition.workspace = true
 renderer131.workspace = true
 window131.workspace = true
 
-anyhow.workspace = true
 ash.workspace = true
+thiserror.workspace = true

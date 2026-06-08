@@ -1,240 +1,120 @@
-use std::{
-    fmt::Debug,
-    sync::{Arc, Mutex, PoisonError, RwLock, Weak},
-    thread::JoinHandle,
-    time::Instant,
-};
+use std::{any::TypeId, fmt::Debug};
 
 use crate::I131;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum SystemError {
-    #[error("System depends on another system that doesn't exist: {}", self)]
-    MissingDependency(String),
-    #[error("System has some invalid configuration: {}", self)]
-    InvalidSystem(String),
-    #[error("System initialization returned an error: {}", self)]
-    InitializationFailed(String),
-    #[error("System depends on a missing OS dependency: {}", self)]
-    OSError(String),
-    #[error("Error while performing atomic operation: {}", self)]
-    ThreadingError(String),
-    #[error("The engine that created this system doesn't exist anymore (went out of scope)")]
-    InvalidEngine,
-    #[error(
-        "Some component of the engine or a system or systems was attempted to be initialized when it is already in a ready state"
-    )]
-    DoubleInitialization(String),
-}
+    #[error("{0}")]
+    ArcError(String),
 
-impl<T> From<PoisonError<T>> for SystemError {
-    fn from(value: PoisonError<T>) -> Self {
-        Self::ThreadingError(value.to_string())
+    #[error("System doesn't exist: {0}")]
+    MissingSystem(String),
+
+    #[error("{0}")]
+    MutexError(String),
+}
+pub trait OptionSystemError<T> {
+    fn ok_or_system_error(self, err: SystemError) -> Result<T, SystemError>;
+}
+impl<T> OptionSystemError<T> for Option<T> {
+    fn ok_or_system_error(self, err: SystemError) -> Result<T, SystemError> {
+        if let Some(opt) = self {
+            Ok(opt)
+        } else {
+            Err(err)
+        }
     }
 }
 
-pub trait System: Send + Sync {
-    /// Static name of the system
-    fn name(&self) -> &'static str;
+#[derive(Default, Clone, Copy, Debug)]
+pub struct SystemIndex(i32, i32);
 
-    /// Called as soon as every system is added to the manager and the engine starts
+impl SystemIndex {
+    pub fn new(thread: i32, system: i32) -> Self {
+        Self(thread, system)
+    }
+}
+
+pub(crate) struct ThreadData {
+    systems: Vec<Box<dyn System>>,
+}
+
+pub trait System {
+    /// Initialize the system.
     ///
-    /// This function prepares the system to run, but doesn't run it
+    /// Only called when the game or editor are opened,
+    /// after all dependencies are already successfully initialized.
     fn initialize(&mut self, engine: &I131) -> Result<(), SystemError>;
 
-    /// Called before the game starts
+    /// Begin play for this system.
     ///
-    /// Expect this function to be called multiple times between initialization and destruction of
-    /// the system
+    /// Called when the game begins. Might be called multiple times in the editor.
+    /// Each time the game is ran from the editor, this is called.
     fn begin_play(&mut self, engine: &I131) -> Result<(), SystemError>;
 
-    /// Called every frame during play
-    fn update(&mut self, delta_seconds: f32, engine: &I131) -> Result<(), SystemError>;
+    /// Called every frame while the game is playing.
+    fn update(&mut self, engine: &I131, delta: f32) -> Result<(), SystemError>;
 
-    /// Called every frame outside of play while the editor is enabled and running
-    fn editor_update(&mut self, delta_seconds: f32, engine: &I131) -> Result<(), SystemError>;
+    /// Called every frame while in the editor.
+    fn in_editor_update(&mut self, engine: &I131, delta: f32) -> Result<(), SystemError>;
 
-    /// Called as the game ends
+    /// End play for this system.
     ///
-    /// Expect this function to be called multiple times between initialization and destruction of
-    /// the system
+    /// Caled when the game ends. Might be called multiple times in the editor.
+    /// Each time the game is stopped in the editor, this is called.
     fn end_play(&mut self, engine: &I131) -> Result<(), SystemError>;
 
-    /// Called before the engine is closed
+    /// Destroy the system.
     ///
-    /// This function releases any dependencies (in-engine and OS)
+    /// Only called when the game or editor are exited,
     fn destroy(&mut self, engine: &I131) -> Result<(), SystemError>;
 }
 
-struct SystemBox {
-    system: Box<dyn System>,
-    initialized: bool,
-    playing: bool,
-    last_update: Instant,
-    should_be_destroyed: bool,
-}
-
-struct SystemThreadData {
-    name: String,
-    systems: Vec<Arc<RwLock<SystemBox>>>,
-}
-
-#[derive(Default)]
-pub struct SystemManager {
-    thread_data: Vec<Arc<Mutex<SystemThreadData>>>,
-    threads: Vec<JoinHandle<Result<(), SystemError>>>,
-    engine: Weak<I131>,
-}
-
-impl SystemManager {
-    pub fn new(engine: Weak<I131>) -> Self {
-        Self {
-            thread_data: Default::default(),
-            threads: Default::default(),
-            engine,
-        }
+impl I131 {
+    pub fn initialize(&mut self) -> Result<(), SystemError> {
+        todo!()
     }
 
-    fn worker_tick(
-        thread_data_mutex: &Arc<Mutex<SystemThreadData>>,
-        engine: &Weak<I131>,
-    ) -> Result<bool, SystemError> {
-        let engine = engine.upgrade().ok_or(SystemError::InvalidEngine)?;
-        let tick_initial_state = engine.state.lock()?.clone();
-
-        let systems = thread_data_mutex.lock()?.systems.clone();
-
-        let mut systems_to_remove = Vec::new();
-
-        for (i, system_arc) in &mut systems.iter().enumerate() {
-            let mut system = system_arc.write()?;
-            if !system.initialized {
-                system.system.initialize(&engine)?;
-                system.initialized = true;
-            }
-
-            if tick_initial_state.playing && !system.playing {
-                system.system.begin_play(&engine)?;
-                system.playing = true;
-            }
-
-            if system.should_be_destroyed {
-                if system.playing {
-                    system.system.end_play(&engine)?;
-                }
-                system.system.destroy(&engine)?;
-
-                systems_to_remove.push(i);
-                continue;
-            }
-
-            let now = Instant::now();
-            let delta_seconds = (now - system.last_update).as_secs_f32();
-            system.last_update = now;
-            system.system.update(delta_seconds, &engine)?;
-
-            if !tick_initial_state.playing && system.playing {
-                system.system.end_play(&engine)?;
-                system.playing = false;
-            }
-        }
-
-        if !systems_to_remove.is_empty() {
-            let systems = &mut thread_data_mutex.lock()?.systems;
-            for i in systems_to_remove.into_iter().rev() {
-                systems.swap_remove(i);
-            }
-        }
-
-        Ok(engine.state.lock()?.running)
+    pub fn create_system<T: System>(&mut self, system: T) -> Result<(), SystemError> {
+        let _ = system;
+        todo!()
     }
 
-    /// Create a worker thread to handle system update functions
-    ///
-    /// `name`: The name of the system
-    fn create_worker_thread(
-        &mut self,
-        name: String,
-    ) -> Result<Arc<Mutex<SystemThreadData>>, SystemError> {
-        self.thread_data.push(Arc::new(Mutex::new(SystemThreadData {
-            name,
-            systems: Vec::default(),
-        })));
+    pub fn system<T: System + 'static>(&self) -> Result<&T, SystemError> {
+        let typeid = TypeId::of::<T>();
+        let idx = self
+            .system_idx
+            .get(&typeid)
+            .ok_or_system_error(SystemError::MissingSystem(format!("{:?}", typeid)))?;
 
-        let thread_data_mutex = self.thread_data.last().unwrap().clone();
-        let last_thread_data = self.thread_data.last().unwrap().clone();
-        let engine = self.engine.clone();
+        let thread =
+            self.systems
+                .get(idx.0 as usize)
+                .ok_or_system_error(SystemError::MissingSystem(format!(
+                    "Thread index out of range in system ID: {:?}",
+                    typeid
+                )))?;
 
-        let worker_thread_fn = || -> Result<(), SystemError> {
-            let thread_data_mutex = thread_data_mutex;
-            let engine = engine;
+        let thread = thread
+            .lock()
+            .map_err(|e| SystemError::MutexError(format!("{e:?}")))?;
 
-            let engine_arc = engine.upgrade().ok_or(SystemError::InvalidEngine)?;
-            let state = engine_arc.state.wait_while(|state| !state.ready)?;
+        let system =
+            thread
+                .systems
+                .get(idx.1 as usize)
+                .ok_or_system_error(SystemError::MissingSystem(format!(
+                    "System index out of range in system ID: {:?}",
+                    typeid
+                )))?;
 
-            let mut running = state.running;
+        let system = system.as_ref();
 
-            drop(state);
-            drop(engine_arc);
-
-            while running {
-                running = Self::worker_tick(&thread_data_mutex, &engine)?;
-            }
-
-            Ok(())
-        };
-
-        self.threads.push(std::thread::spawn(worker_thread_fn));
-
-        Ok(last_thread_data)
+        todo!()
     }
 
-    pub fn create_system<Sys: System + 'static>(
-        &mut self,
-        sys: Sys,
-        pin_to_thread: Option<String>,
-    ) -> Result<(), SystemError> {
-        if let Some(thread_name) = pin_to_thread {
-            if let Some(mut existing) = self
-                .thread_data
-                .iter()
-                .find_map(|t| {
-                    let t = t.lock();
-                    match t {
-                        Ok(t) => {
-                            if t.name == thread_name {
-                                Some(Ok(t))
-                            } else {
-                                None
-                            }
-                        }
-                        Err(e) => Some(Err(e)),
-                    }
-                })
-                .transpose()?
-            {
-                existing.systems.push(Arc::new(RwLock::new(SystemBox {
-                    system: Box::new(sys),
-                    initialized: false,
-                    playing: false,
-                    last_update: Instant::now(),
-                    should_be_destroyed: false,
-                })));
-            } else {
-                let new_thread_data = self.create_worker_thread(thread_name)?;
-                let mut new_thread_data = new_thread_data.lock()?;
-                new_thread_data
-                    .systems
-                    .push(Arc::new(RwLock::new(SystemBox {
-                        system: Box::new(sys),
-                        initialized: false,
-                        playing: false,
-                        last_update: Instant::now(),
-                        should_be_destroyed: false,
-                    })));
-            }
-        }
-        Ok(())
+    pub fn destroy(&mut self) -> Result<(), SystemError> {
+        todo!()
     }
 }

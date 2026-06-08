@@ -1,5 +1,6 @@
-use anyhow::Result;
 use glfw::{Context, Glfw, GlfwReceiver, PWindow, WindowEvent};
+
+use crate::WindowError;
 
 pub struct WindowDataGLFW {
     glfw: Glfw,
@@ -12,7 +13,7 @@ impl super::Window {
         println!("GLFW error:\n{error}\n  - {message}");
     }
 
-    pub fn new(settings: super::WindowSettings) -> Result<Self> {
+    pub fn new(settings: super::WindowSettings) -> Result<Self, WindowError> {
         let mut glfw = glfw::init(Self::glfw_error_callback)?;
         let Some((window, events)) = glfw.create_window(
             settings.size.x,
@@ -20,7 +21,9 @@ impl super::Window {
             settings.title.as_str(),
             glfw::WindowMode::Windowed,
         ) else {
-            return Err(anyhow::anyhow!("Failed to create GLFW window"));
+            return Err(WindowError::WindowCreateError(
+                "Failed to create GLFW window".to_string(),
+            ));
         };
 
         let data = WindowDataGLFW {

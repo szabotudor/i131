@@ -25,6 +25,5 @@ window131 = { version = "0.1.0", path = "./crates/window", features = [ "GLFW" ]
 editor131 = { version = "0.1.0", path = "./crates/editor" }
 
 # External libraries (dependencies)
-anyhow = "1.0.100"
 ash = "0.38.0"
 thiserror = "2.0.18"
