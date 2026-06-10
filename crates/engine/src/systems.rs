@@ -50,15 +50,6 @@ impl<T> From<PoisonError<T>> for SystemError {
     }
 }
 
-#[derive(Default, Clone, Copy, Debug)]
-pub struct SystemIndex(i32, i32);
-
-impl SystemIndex {
-    pub fn new(thread: i32, system: i32) -> Self {
-        Self(thread, system)
-    }
-}
-
 pub(crate) struct ThreadData {
     systems: Vec<Arc<dyn System>>,
     join_handle: JoinHandle<Result<(), SystemError>>,
