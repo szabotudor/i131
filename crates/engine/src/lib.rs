@@ -2,7 +2,7 @@ pub mod schedulers;
 pub mod systems;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, Weak},
     thread::ThreadId,
 };
@@ -13,7 +13,7 @@ pub use window131;
 
 use crate::{
     schedulers::SystemScheduler,
-    systems::{SystemError, ThreadData},
+    systems::{SystemData, SystemError, SystemId, ThreadData},
 };
 
 #[derive(Default, Clone, Copy, PartialEq, Debug)]
@@ -21,14 +21,26 @@ pub enum EngineState {
     #[default]
     Uninitialized,
     Initialized,
+    InEditor,
     Running,
     Stopped,
 }
 
+#[derive(Default)]
+pub(crate) struct TickingThreads {
+    ticking: HashSet<ThreadId>,
+    ticked: HashSet<ThreadId>,
+}
+
 pub(crate) struct EngineData {
     thread_data: HashMap<ThreadId, Arc<RwLock<ThreadData>>>,
+    all_systems: HashMap<SystemId, Arc<RwLock<SystemData>>>,
+    /// Will be incremented by each thread at the end of their ticks
+    /// Engine will reset at end of frame when every thread is done
+    ticking_threads: Arc<(Mutex<TickingThreads>, Condvar)>,
     state: EngineState,
     scheduler: Box<dyn SystemScheduler>,
+    stale: bool,
 }
 
 pub struct I131 {
@@ -48,9 +60,12 @@ impl I131 {
             engine: engine.clone(),
             state: (
                 Mutex::new(EngineData {
-                    thread_data: Default::default(),
-                    state: Default::default(),
+                    thread_data: HashMap::new(),
+                    all_systems: HashMap::new(),
+                    ticking_threads: Arc::default(),
+                    state: EngineState::default(),
                     scheduler,
+                    stale: false,
                 }),
                 Condvar::new(),
             ),
@@ -61,6 +76,28 @@ impl I131 {
         }
 
         Ok(engine)
+    }
+
+    pub fn main_loop(&self) -> Result<(), SystemError> {
+        let ticking_threads = self.lock()?.ticking_threads.clone();
+
+        loop {
+            ticking_threads.1.notify_all();
+
+            {
+                let mut lock = ticking_threads
+                    .1
+                    .wait_while(ticking_threads.0.lock()?, |t| {
+                        let state = self.lock().unwrap();
+                        state
+                            .thread_data
+                            .iter()
+                            .all(|(thread_id, _)| t.ticked.contains(thread_id))
+                    })?;
+                lock.ticked.clear();
+            }
+        }
+        todo!()
     }
 
     pub(crate) fn wait_while<F: FnMut(&mut EngineData) -> bool>(

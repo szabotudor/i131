@@ -20,5 +20,7 @@ fn main() -> Result<(), i32> {
 
     engine.initialize().print()?;
 
+    engine.main_loop().print()?;
+
     Ok(())
 }

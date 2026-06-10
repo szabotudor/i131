@@ -1,16 +1,13 @@
-use std::{
-    any::TypeId,
-    collections::{HashMap, HashSet},
-};
+use std::collections::{HashMap, HashSet};
 
-use crate::systems::SystemError;
+use crate::systems::{SystemError, SystemId};
 
 pub trait SystemScheduler {
     fn schedule(
         &self,
-        dependency_tree: &HashMap<TypeId, HashSet<TypeId>>,
+        dependency_tree: &HashMap<SystemId, HashSet<SystemId>>,
         num_threads: usize,
-    ) -> Result<Vec<Vec<TypeId>>, SystemError>;
+    ) -> Result<Vec<Vec<SystemId>>, SystemError>;
 }
 
 #[derive(Default)]
@@ -23,13 +20,13 @@ impl DAGScheduler {
 impl SystemScheduler for DAGScheduler {
     fn schedule(
         &self,
-        tree: &HashMap<TypeId, HashSet<TypeId>>,
+        tree: &HashMap<SystemId, HashSet<SystemId>>,
         num_threads: usize,
-    ) -> Result<Vec<Vec<TypeId>>, SystemError> {
+    ) -> Result<Vec<Vec<SystemId>>, SystemError> {
         // Computing tiers
 
-        let mut scheduled = HashSet::<TypeId>::new();
-        let mut tiers: Vec<HashSet<TypeId>> = Vec::new();
+        let mut scheduled = HashSet::<SystemId>::new();
+        let mut tiers: Vec<HashSet<SystemId>> = Vec::new();
 
         loop {
             let tier = tree

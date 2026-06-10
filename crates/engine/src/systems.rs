@@ -1,11 +1,12 @@
 use std::{
-    any::TypeId,
+    collections::{HashMap, HashSet},
     fmt::Debug,
-    sync::{Arc, PoisonError, RwLock},
-    thread::{JoinHandle, ThreadId},
+    sync::{Arc, Condvar, Mutex, PoisonError, RwLock},
+    thread::JoinHandle,
+    time::{SystemTime, SystemTimeError},
 };
 
-use crate::{EngineState, I131};
+use crate::{EngineState, I131, TickingThreads};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -17,10 +18,10 @@ pub enum SystemError {
     InvalidEngineState(String),
 
     #[error("System doesn't exist: {0:?}")]
-    MissingSystem(TypeId),
+    MissingSystem(SystemId),
 
     #[error("Cyclic dependency detected duing system scheduling. Affected systems: {0:?}")]
-    SystemCyclicDependency(Vec<TypeId>),
+    SystemCyclicDependency(Vec<SystemId>),
 
     #[error("Issue encountered in system thread: {0:?}")]
     SystemThreadError(String),
@@ -30,6 +31,9 @@ pub enum SystemError {
 
     #[error("Lock is poisoned: {0}")]
     LockPoisonError(String),
+
+    #[error("System time error: {0}")]
+    StstemTimeError(#[from] SystemTimeError),
 }
 pub trait OptionSystemError<T> {
     fn ok_or_system_error(self, err: SystemError) -> Result<T, SystemError>;
@@ -50,8 +54,29 @@ impl<T> From<PoisonError<T>> for SystemError {
     }
 }
 
+pub(crate) struct SystemData {
+    last_update: SystemTime,
+    initialized: bool,
+    playing: bool,
+    queued_for_destroy: bool,
+    system: Box<dyn System>,
+    dependencies: &'static [SystemId],
+}
+impl SystemData {
+    pub(crate) fn new<T: System + 'static>(system: T) -> Self {
+        Self {
+            last_update: SystemTime::now(),
+            initialized: false,
+            playing: false,
+            queued_for_destroy: false,
+            system: Box::new(system),
+            dependencies: T::dependencies(),
+        }
+    }
+}
+
 pub(crate) struct ThreadData {
-    systems: Vec<Arc<dyn System>>,
+    system_data: Vec<Arc<RwLock<SystemData>>>,
     join_handle: JoinHandle<Result<(), SystemError>>,
 }
 
@@ -62,6 +87,9 @@ impl Debug for ThreadData {
             .finish()
     }
 }
+
+#[derive(PartialEq, Eq, Default, Debug, Clone, Copy, Hash)]
+pub struct SystemId(pub &'static str);
 
 pub trait System
 where
@@ -95,20 +123,72 @@ where
     ///
     /// Only called when the game or editor are exited,
     fn destroy(&mut self, engine: &I131) -> Result<(), SystemError>;
+
+    /// Returns list of dependencies for this system.
+    /// Dependencies' update function will be scheduled before this system.
+    ///
+    /// Only dependencies are available to this system through `engine.system<T>()`
+    fn dependencies() -> &'static [SystemId]
+    where
+        Self: Sized;
+
+    /// This system's ID (unique identifier)
+    fn system_id() -> SystemId
+    where
+        Self: Sized;
 }
 
 impl I131 {
-    fn thread_tick(thread_id: &ThreadId, engine: &Arc<I131>) -> Result<(), SystemError> {
-        let thread_data = {
-            let engine_data = engine.lock()?;
-            engine_data
-                .thread_data
-                .get(thread_id)
-                .ok_or_system_error(SystemError::SystemThreadError(format!(
-                    "System thread doesn't exist for thread id {thread_id:?}"
-                )))?
-                .clone()
-        };
+    fn thread_tick(
+        engine: &Arc<I131>,
+        thread_data: &Arc<RwLock<ThreadData>>,
+    ) -> Result<(), SystemError> {
+        let thread_data = thread_data.read()?;
+
+        let engine_state = engine.lock()?.state.clone();
+
+        for system_data in &thread_data.system_data {
+            let mut system_data = system_data.write()?;
+            let engine: &I131 = &engine;
+
+            if engine_state == EngineState::Initialized && !system_data.initialized {
+                system_data.system.initialize(engine)?;
+                system_data.initialized = true;
+            }
+
+            if engine_state == EngineState::Running && !system_data.playing {
+                system_data.system.begin_play(engine)?;
+                system_data.playing = true;
+            } else if engine_state != EngineState::Running && system_data.playing {
+                system_data.system.end_play(engine)?;
+                system_data.playing = false;
+            }
+
+            if engine_state == EngineState::Running {
+                let now = SystemTime::now();
+                let delta_time = now.duration_since(system_data.last_update)?;
+                let delta = delta_time.as_secs_f32();
+                system_data.last_update = now;
+                system_data.system.update(engine, delta)?;
+            } else if engine_state == EngineState::InEditor {
+                let now = SystemTime::now();
+                let delta_time = now.duration_since(system_data.last_update)?;
+                let delta = delta_time.as_secs_f32();
+                system_data.last_update = now;
+                system_data.system.in_editor_update(engine, delta)?;
+            }
+
+            if system_data.queued_for_destroy {
+                if system_data.playing {
+                    system_data.system.end_play(engine)?;
+                    system_data.playing = false;
+                }
+                if system_data.initialized {
+                    system_data.system.destroy(engine)?;
+                    system_data.initialized = false;
+                }
+            }
+        }
 
         todo!("Implement single thread tick: {thread_data:?}")
     }
@@ -124,16 +204,43 @@ impl I131 {
             let thread_id = std::thread::current().id();
             let engine = engine;
 
-            let lock = engine.wait_while(|data| {
-                data.state != EngineState::Running || !data.thread_data.contains_key(&thread_id)
-            })?;
-            let mut state = lock.state;
-            drop(lock);
+            let (thread_data, ticking_threads, mut state) = {
+                // Wait until engine is running
+                let engine_data = engine.wait_while(|data| {
+                    data.state != EngineState::Running || !data.thread_data.contains_key(&thread_id)
+                })?;
+                let thread_data = engine_data
+                    .thread_data
+                    .get(&thread_id)
+                    .ok_or_system_error(SystemError::SystemThreadError(format!(
+                        "System thread doesn't exist for thread id {thread_id:?}"
+                    )))?
+                    .clone();
+                let tick_this_frame = engine_data.ticking_threads.clone();
+
+                (thread_data, tick_this_frame, engine_data.state)
+            };
 
             while state == EngineState::Running {
-                Self::thread_tick(&thread_id, &engine)?;
+                // Wait until the engine signals the next frame to start
+                {
+                    let mut lock = ticking_threads
+                        .1
+                        .wait_while(ticking_threads.0.lock()?, |t| {
+                            t.ticking.contains(&thread_id)
+                        })?;
+                    lock.ticking.insert(thread_id);
+                }
+
+                Self::thread_tick(&engine, &thread_data)?;
                 let lock = engine.lock()?;
                 state = lock.state;
+
+                {
+                    let mut lock = ticking_threads.0.lock()?;
+                    lock.ticked.insert(thread_id);
+                }
+                ticking_threads.1.notify_all();
             }
 
             Ok(())
@@ -143,7 +250,7 @@ impl I131 {
         let thread_id = join_handle.thread().id();
 
         let thread_data = Arc::new(RwLock::new(ThreadData {
-            systems: Vec::default(),
+            system_data: Vec::default(),
             join_handle,
         }));
 
@@ -194,8 +301,39 @@ impl I131 {
         Ok(())
     }
 
-    pub fn create_system<T: System>(&self, system: T) -> Result<(), SystemError> {
-        let _ = system;
+    pub(crate) fn create_system_internal<T: System + 'static>(
+        &self,
+        system: T,
+    ) -> Result<(), SystemError> {
+        let system_data = SystemData::new(system);
+        let mut state = self.lock()?;
+
+        state
+            .all_systems
+            .insert(T::system_id(), Arc::new(RwLock::new(system_data)));
+
+        let tree = state
+            .all_systems
+            .iter()
+            .map(
+                |(sys, deps)| -> Result<(SystemId, HashSet<SystemId>), SystemError> {
+                    let deps = deps
+                        .read()?
+                        .dependencies
+                        .iter()
+                        .copied()
+                        .collect::<HashSet<_>>();
+                    Ok((*sys, deps))
+                },
+            )
+            .collect::<Result<HashMap<SystemId, HashSet<SystemId>>, SystemError>>()?;
+
+        let scheduled_threads = state.scheduler.schedule(&tree, state.thread_data.len())?;
+
+        todo!()
+    }
+
+    pub(crate) fn destroy_system_internal<T: System + 'static>(&self) -> Result<(), SystemError> {
         todo!()
     }
 
