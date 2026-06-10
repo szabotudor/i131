@@ -1,3 +1,4 @@
+pub mod schedulers;
 pub mod systems;
 
 use std::{
@@ -10,7 +11,10 @@ pub use math131;
 pub use renderer131;
 pub use window131;
 
-use crate::systems::{SystemError, ThreadData};
+use crate::{
+    schedulers::SystemScheduler,
+    systems::{SystemError, ThreadData},
+};
 
 #[derive(Default, Clone, Copy, PartialEq, Debug)]
 pub enum EngineState {
@@ -21,13 +25,12 @@ pub enum EngineState {
     Stopped,
 }
 
-#[derive(Default)]
 pub(crate) struct EngineData {
     thread_data: HashMap<ThreadId, Arc<RwLock<ThreadData>>>,
     state: EngineState,
+    scheduler: Box<dyn SystemScheduler>,
 }
 
-#[derive(Default)]
 pub struct I131 {
     engine: Weak<Self>,
     state: (Mutex<EngineData>, Condvar),
@@ -37,10 +40,20 @@ unsafe impl Send for I131 {}
 unsafe impl Sync for I131 {}
 
 impl I131 {
-    pub fn new(num_threads: usize) -> Result<Arc<Self>, SystemError> {
+    pub fn new(
+        num_threads: usize,
+        scheduler: Box<dyn SystemScheduler>,
+    ) -> Result<Arc<Self>, SystemError> {
         let engine = Arc::new_cyclic(|engine| Self {
             engine: engine.clone(),
-            state: Default::default(),
+            state: (
+                Mutex::new(EngineData {
+                    thread_data: Default::default(),
+                    state: Default::default(),
+                    scheduler,
+                }),
+                Condvar::new(),
+            ),
         });
 
         for _ in 0..num_threads {

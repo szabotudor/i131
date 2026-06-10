@@ -1,4 +1,4 @@
-use engine131::I131;
+use engine131::{I131, schedulers::DAGScheduler};
 
 trait ResultPrint<T> {
     fn print(self) -> Result<T, i32>;
@@ -16,7 +16,7 @@ impl<T, E: std::fmt::Display> ResultPrint<T> for Result<T, E> {
 }
 
 fn main() -> Result<(), i32> {
-    let engine = I131::new(3).print()?;
+    let engine = I131::new(3, Box::new(DAGScheduler::new())).print()?;
 
     engine.initialize().print()?;
 

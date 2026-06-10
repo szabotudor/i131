@@ -19,6 +19,9 @@ pub enum SystemError {
     #[error("System doesn't exist: {0:?}")]
     MissingSystem(TypeId),
 
+    #[error("Cyclic dependency detected duing system scheduling. Affected systems: {0:?}")]
+    SystemCyclicDependency(Vec<TypeId>),
+
     #[error("Issue encountered in system thread: {0:?}")]
     SystemThreadError(String),
 
@@ -160,6 +163,10 @@ impl I131 {
         self.notify_all();
 
         Ok(())
+    }
+
+    pub fn compute_system_scheduling(&self) -> Result<(), SystemError> {
+        todo!()
     }
 
     pub fn initialize(&self) -> Result<(), SystemError> {
