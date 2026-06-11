@@ -95,6 +95,7 @@ impl I131 {
             }
 
             let systems_to_destroy = {
+                // First check to destroy systems
                 let mut lock = self.wait_while(|data| {
                     data.thread_data
                         .iter()
@@ -119,11 +120,15 @@ impl I131 {
                 for system in &systems_to_destroy {
                     lock.all_systems.remove(system);
                 }
+
+                // Then return
                 systems_to_destroy
             };
             if !systems_to_destroy.is_empty() {
                 self.recompute_schedule()?;
             }
+
+            self.create_systems_internal()?;
         }
 
         Ok(())

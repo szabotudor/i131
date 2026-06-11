@@ -1,9 +1,9 @@
 use std::{
-    any::{Any, TypeId, type_name},
+    any::{Any, type_name},
     collections::{HashMap, HashSet},
     fmt::Debug,
     ops::{Deref, DerefMut},
-    sync::{Arc, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard},
+    sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard},
     thread::JoinHandle,
     time::{SystemTime, SystemTimeError},
 };
@@ -82,59 +82,85 @@ impl SystemData {
     }
 }
 
-pub struct MappedSystemGuard<'a, T> {
-    _guard: RwLockReadGuard<'a, T>,
+pub struct SystemAccess {
+    data: Arc<RwLock<SystemData>>,
+}
+
+pub struct SystemDataReadGuard<'a, T> {
+    _guard: RwLockReadGuard<'a, SystemData>,
     value: &'a T,
 }
-impl<'a, T> Deref for MappedSystemGuard<'a, T> {
+impl<T> Deref for SystemDataReadGuard<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.value
+        self.value
     }
 }
 
-pub struct MappedSystemGuardMut<'a, T> {
-    _guard: RwLockWriteGuard<'a, T>,
+pub struct SystemDataWriteGuard<'a, T> {
+    _guard: RwLockWriteGuard<'a, SystemData>,
     value: &'a mut T,
 }
-impl<'a, T> Deref for MappedSystemGuardMut<'a, T> {
+impl<T> Deref for SystemDataWriteGuard<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.value
+        self.value
     }
 }
-impl<'a, T> DerefMut for MappedSystemGuardMut<'a, T> {
+impl<T> DerefMut for SystemDataWriteGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.value
+        self.value
     }
 }
 
-pub trait SystemGuardMap<'a, T: System + 'static>
-where
-    Self: Into<RwLockReadGuard<'a, T>>,
-{
-    fn map(lock: RwLockReadGuard<'a, T>) -> MappedSystemGuard<'a, T> {
-        let value = &lock as *const _;
-        MappedSystemGuard {
-            _guard: lock,
-            value: unsafe { &*(value as *const T) },
-        }
+impl SystemAccess {
+    pub(crate) fn new(data: Arc<RwLock<SystemData>>) -> Self {
+        Self { data }
     }
-}
-impl<'a, T: System + 'static> SystemGuardMap<'a, T> for RwLockReadGuard<'a, T> {}
+    pub fn read<T: System + 'static>(&self) -> Result<SystemDataReadGuard<'_, T>, SystemError> {
+        let guard = self.data.read()?;
+        let value =
+            guard
+                .system
+                .downcast_ref()
+                .ok_or_system_error(SystemError::WrongSystemType(
+                    T::system_id(),
+                    type_name::<T>(),
+                ))?;
+        // Borrow erasure is safe because lock owns the data, and lock should be dropped along with
+        // SystemDataReadGuard
+        //
+        // Even if it isn't, the user shouldn't be able to access `value` after they drop
+        // SystemDataReadGuard
+        let value = value as *const T;
 
-pub trait SystemGuardMapMut<'a, T: System + 'static>
-where
-    Self: Into<RwLockReadGuard<'a, T>>,
-{
-    fn map(mut lock: RwLockWriteGuard<'a, T>) -> MappedSystemGuardMut<'a, T> {
-        let value = &mut lock as *mut _;
-        MappedSystemGuardMut {
-            _guard: lock,
-            value: unsafe { &mut *(value as *mut T) },
-        }
+        Ok(SystemDataReadGuard {
+            _guard: guard,
+            value: unsafe { &*value },
+        })
+    }
+
+    pub fn write<T: System + 'static>(
+        &mut self,
+    ) -> Result<SystemDataWriteGuard<'_, T>, SystemError> {
+        let mut guard = self.data.write()?;
+        let value =
+            guard
+                .system
+                .downcast_mut()
+                .ok_or_system_error(SystemError::WrongSystemType(
+                    T::system_id(),
+                    type_name::<T>(),
+                ))?;
+        // See comment above
+        let value = value as *mut T;
+
+        Ok(SystemDataWriteGuard {
+            _guard: guard,
+            value: unsafe { &mut *value },
+        })
     }
 }
 
@@ -434,16 +460,17 @@ impl I131 {
         Ok(())
     }
 
-    pub fn system<T: System + 'static>(&self, system_id: &SystemId) -> Result<&T, SystemError> {
+    pub fn system<T: System + 'static>(
+        &self,
+        system_id: &SystemId,
+    ) -> Result<SystemAccess, SystemError> {
         let state = self.lock()?;
         let system = state
             .all_systems
             .get(system_id)
-            .ok_or_system_error(SystemError::MissingSystem(*system_id))?;
-        let system_data = system.read()?;
-        let system = system_data
-            .system
-            .downcast_ref::<T>()
-            .ok_or_system_error(SystemError::WrongSystemType(*system_id, type_name::<T>()))?;
+            .ok_or_system_error(SystemError::MissingSystem(*system_id))?
+            .clone();
+
+        Ok(SystemAccess::new(system))
     }
 }
