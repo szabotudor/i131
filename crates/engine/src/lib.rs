@@ -30,17 +30,18 @@ pub enum EngineState {
 pub(crate) struct TickingThreads {
     ticking: HashSet<ThreadId>,
     ticked: HashSet<ThreadId>,
+    allow_new_frame: bool,
 }
 
 pub(crate) struct EngineData {
+    system_create_queue: Vec<(SystemData, SystemId)>,
     thread_data: HashMap<ThreadId, Arc<RwLock<ThreadData>>>,
     all_systems: HashMap<SystemId, Arc<RwLock<SystemData>>>,
     /// Will be incremented by each thread at the end of their ticks
     /// Engine will reset at end of frame when every thread is done
-    ticking_threads: Arc<(Mutex<TickingThreads>, Condvar)>,
+    ticking_threads: TickingThreads,
     state: EngineState,
     scheduler: Box<dyn SystemScheduler>,
-    stale: bool,
 }
 
 pub struct I131 {
@@ -60,12 +61,12 @@ impl I131 {
             engine: engine.clone(),
             state: (
                 Mutex::new(EngineData {
+                    system_create_queue: Vec::new(),
                     thread_data: HashMap::new(),
                     all_systems: HashMap::new(),
-                    ticking_threads: Arc::default(),
+                    ticking_threads: TickingThreads::default(),
                     state: EngineState::default(),
                     scheduler,
-                    stale: false,
                 }),
                 Condvar::new(),
             ),
@@ -79,27 +80,64 @@ impl I131 {
     }
 
     pub fn main_loop(&self) -> Result<(), SystemError> {
-        let ticking_threads = self.lock()?.ticking_threads.clone();
-
         loop {
-            ticking_threads.1.notify_all();
+            {
+                let mut lock = self.lock()?;
+                lock.ticking_threads.allow_new_frame = true;
+            }
+            self.notify_all();
 
             {
-                let mut lock = ticking_threads
-                    .1
-                    .wait_while(ticking_threads.0.lock()?, |t| {
-                        let state = self.lock().unwrap();
-                        state
-                            .thread_data
-                            .iter()
-                            .all(|(thread_id, _)| t.ticked.contains(thread_id))
-                    })?;
-                lock.ticked.clear();
+                let mut lock = self.wait_while(|data| {
+                    data.ticking_threads.ticking.len() < data.thread_data.len()
+                })?;
+                lock.ticking_threads.allow_new_frame = false;
+            }
+
+            let systems_to_destroy = {
+                let mut lock = self.wait_while(|data| {
+                    data.thread_data
+                        .iter()
+                        .all(|(thread_id, _)| data.ticking_threads.ticked.contains(thread_id))
+                })?;
+                lock.ticking_threads.ticked.clear();
+                lock.ticking_threads.ticking.clear();
+
+                if lock.all_systems.is_empty() {
+                    break;
+                }
+
+                let systems_to_destroy = lock
+                    .all_systems
+                    .iter()
+                    .filter(|(_, sys)| {
+                        let system = sys.read().unwrap();
+                        system.destroyed
+                    })
+                    .map(|(id, _)| *id)
+                    .collect::<Vec<_>>();
+                for system in &systems_to_destroy {
+                    lock.all_systems.remove(system);
+                }
+                systems_to_destroy
+            };
+            if !systems_to_destroy.is_empty() {
+                self.recompute_schedule()?;
             }
         }
-        todo!()
+
+        Ok(())
     }
 
+    pub(crate) fn wait_until_end_of_frame(
+        &self,
+    ) -> Result<MutexGuard<'_, EngineData>, SystemError> {
+        self.wait_while(|data| {
+            !data.ticking_threads.ticking.is_empty()
+                || !data.ticking_threads.ticked.is_empty()
+                || data.ticking_threads.allow_new_frame
+        })
+    }
     pub(crate) fn wait_while<F: FnMut(&mut EngineData) -> bool>(
         &self,
         f: F,
@@ -112,8 +150,5 @@ impl I131 {
     }
     pub(crate) fn notify_all(&self) {
         self.state.1.notify_all();
-    }
-    pub(crate) fn notify_one(&self) {
-        self.state.1.notify_one();
     }
 }

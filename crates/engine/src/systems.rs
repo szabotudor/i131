@@ -1,12 +1,14 @@
 use std::{
+    any::{Any, TypeId, type_name},
     collections::{HashMap, HashSet},
     fmt::Debug,
-    sync::{Arc, Condvar, Mutex, PoisonError, RwLock},
+    ops::{Deref, DerefMut},
+    sync::{Arc, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard},
     thread::JoinHandle,
     time::{SystemTime, SystemTimeError},
 };
 
-use crate::{EngineState, I131, TickingThreads};
+use crate::{EngineState, I131};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -19,6 +21,9 @@ pub enum SystemError {
 
     #[error("System doesn't exist: {0:?}")]
     MissingSystem(SystemId),
+
+    #[error("Failed to downcast System to correct type: {0:?} is not {1}")]
+    WrongSystemType(SystemId, &'static str),
 
     #[error("Cyclic dependency detected duing system scheduling. Affected systems: {0:?}")]
     SystemCyclicDependency(Vec<SystemId>),
@@ -55,12 +60,13 @@ impl<T> From<PoisonError<T>> for SystemError {
 }
 
 pub(crate) struct SystemData {
-    last_update: SystemTime,
-    initialized: bool,
-    playing: bool,
-    queued_for_destroy: bool,
-    system: Box<dyn System>,
-    dependencies: &'static [SystemId],
+    pub(crate) last_update: SystemTime,
+    pub(crate) initialized: bool,
+    pub(crate) playing: bool,
+    pub(crate) queued_for_destroy: bool,
+    pub(crate) destroyed: bool,
+    pub(crate) system: Box<dyn System>,
+    pub(crate) dependencies: &'static [SystemId],
 }
 impl SystemData {
     pub(crate) fn new<T: System + 'static>(system: T) -> Self {
@@ -69,8 +75,65 @@ impl SystemData {
             initialized: false,
             playing: false,
             queued_for_destroy: false,
+            destroyed: false,
             system: Box::new(system),
             dependencies: T::dependencies(),
+        }
+    }
+}
+
+pub struct MappedSystemGuard<'a, T> {
+    _guard: RwLockReadGuard<'a, T>,
+    value: &'a T,
+}
+impl<'a, T> Deref for MappedSystemGuard<'a, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+
+pub struct MappedSystemGuardMut<'a, T> {
+    _guard: RwLockWriteGuard<'a, T>,
+    value: &'a mut T,
+}
+impl<'a, T> Deref for MappedSystemGuardMut<'a, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+impl<'a, T> DerefMut for MappedSystemGuardMut<'a, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.value
+    }
+}
+
+pub trait SystemGuardMap<'a, T: System + 'static>
+where
+    Self: Into<RwLockReadGuard<'a, T>>,
+{
+    fn map(lock: RwLockReadGuard<'a, T>) -> MappedSystemGuard<'a, T> {
+        let value = &lock as *const _;
+        MappedSystemGuard {
+            _guard: lock,
+            value: unsafe { &*(value as *const T) },
+        }
+    }
+}
+impl<'a, T: System + 'static> SystemGuardMap<'a, T> for RwLockReadGuard<'a, T> {}
+
+pub trait SystemGuardMapMut<'a, T: System + 'static>
+where
+    Self: Into<RwLockReadGuard<'a, T>>,
+{
+    fn map(mut lock: RwLockWriteGuard<'a, T>) -> MappedSystemGuardMut<'a, T> {
+        let value = &mut lock as *mut _;
+        MappedSystemGuardMut {
+            _guard: lock,
+            value: unsafe { &mut *(value as *mut T) },
         }
     }
 }
@@ -93,7 +156,7 @@ pub struct SystemId(pub &'static str);
 
 pub trait System
 where
-    Self: Send + Sync,
+    Self: Send + Sync + Any,
 {
     /// Initialize the system.
     ///
@@ -138,6 +201,15 @@ where
         Self: Sized;
 }
 
+impl dyn System {
+    pub fn downcast_ref<T: System + 'static>(&self) -> Option<&T> {
+        (self as &dyn Any).downcast_ref()
+    }
+    pub fn downcast_mut<T: System + 'static>(&mut self) -> Option<&mut T> {
+        (self as &mut dyn Any).downcast_mut()
+    }
+}
+
 impl I131 {
     fn thread_tick(
         engine: &Arc<I131>,
@@ -178,7 +250,7 @@ impl I131 {
                 system_data.system.in_editor_update(engine, delta)?;
             }
 
-            if system_data.queued_for_destroy {
+            if engine_state == EngineState::Stopped || system_data.queued_for_destroy {
                 if system_data.playing {
                     system_data.system.end_play(engine)?;
                     system_data.playing = false;
@@ -204,7 +276,7 @@ impl I131 {
             let thread_id = std::thread::current().id();
             let engine = engine;
 
-            let (thread_data, ticking_threads, mut state) = {
+            let (thread_data, mut state) = {
                 // Wait until engine is running
                 let engine_data = engine.wait_while(|data| {
                     data.state != EngineState::Running || !data.thread_data.contains_key(&thread_id)
@@ -216,20 +288,18 @@ impl I131 {
                         "System thread doesn't exist for thread id {thread_id:?}"
                     )))?
                     .clone();
-                let tick_this_frame = engine_data.ticking_threads.clone();
 
-                (thread_data, tick_this_frame, engine_data.state)
+                (thread_data, engine_data.state)
             };
 
             while state == EngineState::Running {
                 // Wait until the engine signals the next frame to start
                 {
-                    let mut lock = ticking_threads
-                        .1
-                        .wait_while(ticking_threads.0.lock()?, |t| {
-                            t.ticking.contains(&thread_id)
-                        })?;
-                    lock.ticking.insert(thread_id);
+                    let mut lock = engine.wait_while(|data| {
+                        data.ticking_threads.ticking.contains(&thread_id)
+                            && !data.ticking_threads.allow_new_frame
+                    })?;
+                    lock.ticking_threads.ticking.insert(thread_id);
                 }
 
                 Self::thread_tick(&engine, &thread_data)?;
@@ -237,10 +307,10 @@ impl I131 {
                 state = lock.state;
 
                 {
-                    let mut lock = ticking_threads.0.lock()?;
-                    lock.ticked.insert(thread_id);
+                    let mut lock = engine.lock()?;
+                    lock.ticking_threads.ticked.insert(thread_id);
                 }
-                ticking_threads.1.notify_all();
+                engine.notify_all();
             }
 
             Ok(())
@@ -301,16 +371,8 @@ impl I131 {
         Ok(())
     }
 
-    pub(crate) fn create_system_internal<T: System + 'static>(
-        &self,
-        system: T,
-    ) -> Result<(), SystemError> {
-        let system_data = SystemData::new(system);
-        let mut state = self.lock()?;
-
-        state
-            .all_systems
-            .insert(T::system_id(), Arc::new(RwLock::new(system_data)));
+    pub(crate) fn recompute_schedule(&self) -> Result<(), SystemError> {
+        let state = self.wait_until_end_of_frame()?;
 
         let tree = state
             .all_systems
@@ -330,18 +392,58 @@ impl I131 {
 
         let scheduled_threads = state.scheduler.schedule(&tree, state.thread_data.len())?;
 
-        todo!()
+        for (schedule, (_, thread_data)) in scheduled_threads.iter().zip(state.thread_data.iter()) {
+            let mut thread_data = thread_data.write()?;
+            let systems = schedule
+                .iter()
+                .map(|sys| {
+                    state
+                        .all_systems
+                        .get(sys)
+                        .cloned()
+                        .ok_or_system_error(SystemError::MissingSystem(*sys))
+                })
+                .collect::<Result<Vec<_>, SystemError>>()?;
+            thread_data.system_data = systems;
+        }
+
+        Ok(())
     }
 
-    pub(crate) fn destroy_system_internal<T: System + 'static>(&self) -> Result<(), SystemError> {
-        todo!()
+    pub fn create_system<T: System + 'static>(&self, system: T) -> Result<(), SystemError> {
+        let mut state = self.lock()?;
+        let system_data = SystemData::new(system);
+
+        state
+            .system_create_queue
+            .push((system_data, T::system_id()));
+
+        Ok(())
+    }
+    pub(crate) fn create_systems_internal(&self) -> Result<(), SystemError> {
+        let mut state = self.wait_until_end_of_frame()?;
+
+        let queue = state.system_create_queue.drain(..).collect::<Vec<_>>();
+        for (system_data, sys_id) in queue {
+            state
+                .all_systems
+                .insert(sys_id, Arc::new(RwLock::new(system_data)));
+            self.recompute_schedule()?;
+        }
+
+        Ok(())
     }
 
-    pub fn system<T: System + 'static>(&self) -> Result<&T, SystemError> {
-        todo!()
-    }
-
-    pub fn destroy(&mut self) -> Result<(), SystemError> {
-        todo!()
+    pub fn system<T: System + 'static>(&self, system_id: &SystemId) -> Result<&T, SystemError> {
+        let state = self.lock()?;
+        let system = state
+            .all_systems
+            .get(system_id)
+            .ok_or_system_error(SystemError::MissingSystem(*system_id))?;
+        let system_data = system.read()?;
+        let system = system_data
+            .system
+            .downcast_ref::<T>()
+            .ok_or_system_error(SystemError::WrongSystemType(*system_id, type_name::<T>()))?;
     }
 }
