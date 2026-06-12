@@ -1,5 +1,9 @@
 use engine131::{I131, schedulers::DAGScheduler};
 
+use crate::editor::Editor;
+
+mod editor;
+
 trait ResultPrint<T> {
     fn print(self) -> Result<T, i32>;
 }
@@ -22,7 +26,8 @@ fn main() -> Result<(), i32> {
     engine.initialize().print()?;
     println!("Initialized engine");
 
-    println!("Created test system");
+    engine.create_system(Editor::default()).print()?;
+    println!("Opened editor");
 
     engine.main_loop().print()?;
 
