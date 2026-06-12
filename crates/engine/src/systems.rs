@@ -336,7 +336,7 @@ impl I131 {
                 {
                     let mut lock = engine.wait_while(|data| {
                         data.ticking_threads.ticking.contains(&thread_id)
-                            || !data.ticking_threads.allow_new_frame
+                            || data.ticking_threads.ticked.contains(&thread_id)
                     })?;
                     lock.ticking_threads.ticking.insert(thread_id);
                 }

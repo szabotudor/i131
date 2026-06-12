@@ -31,7 +31,6 @@ pub enum EngineState {
 pub(crate) struct TickingThreads {
     ticking: HashSet<ThreadId>,
     ticked: HashSet<ThreadId>,
-    allow_new_frame: bool,
 }
 
 pub(crate) struct EngineData {
@@ -91,26 +90,19 @@ impl I131 {
                     println!("Stopping engine");
                     break;
                 }
-                lock.ticking_threads.allow_new_frame = true;
+                lock.ticking_threads.ticked.clear();
+                lock.ticking_threads.ticking.clear();
             }
             self.notify_all();
 
             {
-                let mut lock = self.wait_while(|data| {
-                    data.ticking_threads.ticking.len() < data.thread_data.len()
+                // Just need to wait until all threads are done
+                let _lock = self.wait_while(|data| {
+                    data.thread_data.iter().any(|(thread_id, _)| {
+                        !(data.ticking_threads.ticked.contains(thread_id)
+                            && data.ticking_threads.ticking.contains(thread_id))
+                    })
                 })?;
-                lock.ticking_threads.allow_new_frame = false;
-            }
-
-            {
-                // First check to destroy systems
-                let mut lock = self.wait_while(|data| {
-                    data.thread_data
-                        .iter()
-                        .any(|(thread_id, _)| !data.ticking_threads.ticked.contains(thread_id))
-                })?;
-                lock.ticking_threads.ticked.clear();
-                lock.ticking_threads.ticking.clear();
             };
 
             self.process_create_and_destroy_queues()?;
@@ -123,9 +115,7 @@ impl I131 {
         &self,
     ) -> Result<MutexGuard<'_, EngineData>, SystemError> {
         self.wait_while(|data| {
-            !data.ticking_threads.ticking.is_empty()
-                || !data.ticking_threads.ticked.is_empty()
-                || data.ticking_threads.allow_new_frame
+            !data.ticking_threads.ticking.is_empty() || !data.ticking_threads.ticked.is_empty()
         })
     }
     pub(crate) fn wait_while<F: FnMut(&mut EngineData) -> bool>(
