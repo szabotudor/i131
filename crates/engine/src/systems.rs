@@ -1,7 +1,7 @@
 use std::{
     any::{Any, type_name},
     collections::{HashMap, HashSet},
-    fmt::Debug,
+    fmt::{Debug, Display},
     ops::{Deref, DerefMut},
     sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard},
     thread::JoinHandle,
@@ -19,10 +19,13 @@ pub enum SystemError {
     #[error("Engine state is invalid: {0}")]
     InvalidEngineState(String),
 
-    #[error("System doesn't exist: {0:?}")]
+    #[error("System doesn't exist: \"{0}\"")]
     MissingSystem(SystemId),
 
-    #[error("Failed to downcast System to correct type: {0:?} is not {1}")]
+    #[error("Missing dependency \"{1}\" for system \"{0}\"")]
+    MissingDependency(SystemId, SystemId),
+
+    #[error("Failed to downcast System to correct type: \"{0}\" is not {1}")]
     WrongSystemType(SystemId, &'static str),
 
     #[error("Cyclic dependency detected duing system scheduling. Affected systems: {0:?}")]
@@ -179,6 +182,11 @@ impl Debug for ThreadData {
 
 #[derive(PartialEq, Eq, Default, Debug, Clone, Copy, Hash)]
 pub struct SystemId(pub &'static str);
+impl Display for SystemId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 pub trait System
 where
@@ -483,10 +491,7 @@ impl I131 {
                         }
                     }
                 }
-                let removed = state.all_systems.remove(&sys_id);
-                if removed.is_none() {
-                    return Err(SystemError::MissingSystem(sys_id));
-                }
+                state.all_systems.remove(&sys_id);
             }
 
             if state.all_systems.is_empty() {

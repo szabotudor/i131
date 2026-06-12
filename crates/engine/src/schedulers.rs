@@ -25,6 +25,15 @@ impl SystemScheduler for DAGScheduler {
     ) -> Result<Vec<Vec<SystemId>>, SystemError> {
         // Computing tiers
 
+        for (sys, deps) in tree {
+            if let Some(dep) = deps
+                .iter()
+                .find(|dep| tree.keys().find(|key| key == dep).is_none())
+            {
+                return Err(SystemError::MissingDependency(*sys, *dep));
+            }
+        }
+
         let mut scheduled = HashSet::<SystemId>::new();
         let mut tiers: Vec<HashSet<SystemId>> = Vec::new();
 
