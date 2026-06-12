@@ -343,7 +343,6 @@ impl I131 {
                 engine.notify_all();
 
                 Self::thread_tick(&engine, &thread_data)?;
-                std::thread::sleep(std::time::Duration::from_millis(500));
 
                 {
                     let mut lock = engine.lock()?;
