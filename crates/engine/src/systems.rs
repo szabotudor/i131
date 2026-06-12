@@ -243,13 +243,17 @@ impl I131 {
     ) -> Result<(), SystemError> {
         let thread_data = thread_data.read()?;
 
-        let engine_state = engine.lock()?.state.clone();
+        let engine_state = engine.lock()?.state;
 
         for system_data in &thread_data.system_data {
             let mut system_data = system_data.write()?;
-            let engine: &I131 = &engine;
+            let engine: &I131 = engine;
 
-            if engine_state == EngineState::Initialized && !system_data.initialized {
+            if (engine_state == EngineState::Initialized
+                || engine_state == EngineState::InEditor
+                || engine_state == EngineState::Running)
+                && !system_data.initialized
+            {
                 system_data.system.initialize(engine)?;
                 system_data.initialized = true;
             }
@@ -288,7 +292,7 @@ impl I131 {
             }
         }
 
-        todo!("Implement single thread tick: {thread_data:?}")
+        Ok(())
     }
 
     /// Contains the thread update function too
@@ -315,26 +319,28 @@ impl I131 {
                     )))?
                     .clone();
 
-                (thread_data, engine_data.state)
+                (thread_data, engine_data.state.clone())
             };
+            engine.notify_all();
 
             while state == EngineState::Running {
                 // Wait until the engine signals the next frame to start
                 {
                     let mut lock = engine.wait_while(|data| {
                         data.ticking_threads.ticking.contains(&thread_id)
-                            && !data.ticking_threads.allow_new_frame
+                            || !data.ticking_threads.allow_new_frame
                     })?;
                     lock.ticking_threads.ticking.insert(thread_id);
                 }
+                engine.notify_all();
 
                 Self::thread_tick(&engine, &thread_data)?;
-                let lock = engine.lock()?;
-                state = lock.state;
+                std::thread::sleep(std::time::Duration::from_millis(500));
 
                 {
                     let mut lock = engine.lock()?;
                     lock.ticking_threads.ticked.insert(thread_id);
+                    state = lock.state;
                 }
                 engine.notify_all();
             }
@@ -359,10 +365,6 @@ impl I131 {
         Ok(())
     }
 
-    pub fn compute_system_scheduling(&self) -> Result<(), SystemError> {
-        todo!()
-    }
-
     pub fn initialize(&self) -> Result<(), SystemError> {
         {
             let mut lock = self.lock()?;
@@ -373,6 +375,7 @@ impl I131 {
             }
 
             // TODO: Internal system init
+            // Will add built-in systems here
 
             lock.state = EngineState::Initialized;
         }
@@ -380,7 +383,7 @@ impl I131 {
         Ok(())
     }
 
-    pub fn run(&self) -> Result<(), SystemError> {
+    pub(crate) fn run(&self) -> Result<(), SystemError> {
         {
             let mut lock = self.lock()?;
             if lock.state != EngineState::Initialized {
@@ -446,17 +449,52 @@ impl I131 {
 
         Ok(())
     }
-    pub(crate) fn create_systems_internal(&self) -> Result<(), SystemError> {
-        let mut state = self.wait_until_end_of_frame()?;
+    pub fn destroy_system(&self, system_id: SystemId) -> Result<(), SystemError> {
+        let mut state = self.lock()?;
+        state.system_destroy_queue.push(system_id);
 
-        let queue = state.system_create_queue.drain(..).collect::<Vec<_>>();
-        for (system_data, sys_id) in queue {
-            state
-                .all_systems
-                .insert(sys_id, Arc::new(RwLock::new(system_data)));
-            self.recompute_schedule()?;
+        Ok(())
+    }
+    pub(crate) fn process_create_and_destroy_queues(&self) -> Result<(), SystemError> {
+        {
+            let mut state = self.wait_until_end_of_frame()?;
+
+            let create_queue = state.system_create_queue.drain(..).collect::<Vec<_>>();
+            for (system_data, sys_id) in create_queue {
+                state
+                    .all_systems
+                    .insert(sys_id, Arc::new(RwLock::new(system_data)));
+            }
+
+            let destroy_queue = state.system_destroy_queue.drain(..).collect::<Vec<_>>();
+            for sys_id in destroy_queue {
+                {
+                    let mut system_data = state
+                        .all_systems
+                        .get(&sys_id)
+                        .ok_or_system_error(SystemError::MissingSystem(sys_id))?
+                        .write()?;
+                    if !system_data.destroyed {
+                        if system_data.playing {
+                            system_data.system.end_play(self)?;
+                        }
+                        if system_data.initialized {
+                            system_data.system.destroy(self)?;
+                        }
+                    }
+                }
+                let removed = state.all_systems.remove(&sys_id);
+                if removed.is_none() {
+                    return Err(SystemError::MissingSystem(sys_id));
+                }
+            }
+
+            if state.all_systems.is_empty() {
+                state.state = EngineState::Stopped;
+            }
         }
 
+        self.recompute_schedule()?;
         Ok(())
     }
 

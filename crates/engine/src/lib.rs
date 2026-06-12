@@ -26,7 +26,7 @@ pub enum EngineState {
     Stopped,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub(crate) struct TickingThreads {
     ticking: HashSet<ThreadId>,
     ticked: HashSet<ThreadId>,
@@ -35,6 +35,7 @@ pub(crate) struct TickingThreads {
 
 pub(crate) struct EngineData {
     system_create_queue: Vec<(SystemData, SystemId)>,
+    system_destroy_queue: Vec<SystemId>,
     thread_data: HashMap<ThreadId, Arc<RwLock<ThreadData>>>,
     all_systems: HashMap<SystemId, Arc<RwLock<SystemData>>>,
     /// Will be incremented by each thread at the end of their ticks
@@ -62,6 +63,7 @@ impl I131 {
             state: (
                 Mutex::new(EngineData {
                     system_create_queue: Vec::new(),
+                    system_destroy_queue: Vec::new(),
                     thread_data: HashMap::new(),
                     all_systems: HashMap::new(),
                     ticking_threads: TickingThreads::default(),
@@ -80,9 +82,14 @@ impl I131 {
     }
 
     pub fn main_loop(&self) -> Result<(), SystemError> {
+        self.run()?;
         loop {
             {
                 let mut lock = self.lock()?;
+                if lock.all_systems.is_empty() && lock.state == EngineState::Stopped {
+                    println!("Stopping engine");
+                    break;
+                }
                 lock.ticking_threads.allow_new_frame = true;
             }
             self.notify_all();
@@ -94,41 +101,18 @@ impl I131 {
                 lock.ticking_threads.allow_new_frame = false;
             }
 
-            let systems_to_destroy = {
+            {
                 // First check to destroy systems
                 let mut lock = self.wait_while(|data| {
                     data.thread_data
                         .iter()
-                        .all(|(thread_id, _)| data.ticking_threads.ticked.contains(thread_id))
+                        .any(|(thread_id, _)| !data.ticking_threads.ticked.contains(thread_id))
                 })?;
                 lock.ticking_threads.ticked.clear();
                 lock.ticking_threads.ticking.clear();
-
-                if lock.all_systems.is_empty() {
-                    break;
-                }
-
-                let systems_to_destroy = lock
-                    .all_systems
-                    .iter()
-                    .filter(|(_, sys)| {
-                        let system = sys.read().unwrap();
-                        system.destroyed
-                    })
-                    .map(|(id, _)| *id)
-                    .collect::<Vec<_>>();
-                for system in &systems_to_destroy {
-                    lock.all_systems.remove(system);
-                }
-
-                // Then return
-                systems_to_destroy
             };
-            if !systems_to_destroy.is_empty() {
-                self.recompute_schedule()?;
-            }
 
-            self.create_systems_internal()?;
+            self.process_create_and_destroy_queues()?;
         }
 
         Ok(())
