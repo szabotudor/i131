@@ -5,7 +5,7 @@ use std::{
     ops::{Deref, DerefMut},
     sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard},
     thread::JoinHandle,
-    time::{Duration, SystemTime, SystemTimeError},
+    time::{SystemTime, SystemTimeError},
 };
 
 use crate::{EngineState, I131};
