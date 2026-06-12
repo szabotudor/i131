@@ -26,10 +26,7 @@ impl SystemScheduler for DAGScheduler {
         // Computing tiers
 
         for (sys, deps) in tree {
-            if let Some(dep) = deps
-                .iter()
-                .find(|dep| tree.keys().find(|key| key == dep).is_none())
-            {
+            if let Some(dep) = deps.iter().find(|dep| !tree.keys().any(|key| key == *dep)) {
                 return Err(SystemError::MissingDependency(*sys, *dep));
             }
         }

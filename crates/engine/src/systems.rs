@@ -327,7 +327,7 @@ impl I131 {
                     )))?
                     .clone();
 
-                (thread_data, engine_data.state.clone())
+                (thread_data, engine_data.state)
             };
             engine.notify_all();
 
