@@ -1,64 +1,143 @@
+pub mod schedulers;
 pub mod systems;
 
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, Weak},
+    thread::ThreadId,
+};
 
 pub use math131;
 pub use renderer131;
 pub use window131;
 
-use crate::systems::{SystemError, SystemManager};
+use crate::{
+    schedulers::SystemScheduler,
+    systems::{SystemData, SystemError, SystemId, ThreadData},
+};
 
-#[derive(Default, Clone)]
-pub struct EngineState {
-    pub ready: bool,
-    pub running: bool,
-    pub playing: bool,
-}
-pub struct EngineStateHandler {
-    mutex: Mutex<EngineState>,
-    cond: Condvar,
-}
-
-impl Default for EngineStateHandler {
-    fn default() -> Self {
-        Self {
-            mutex: Mutex::new(EngineState::default()),
-            cond: Default::default(),
-        }
-    }
-}
-impl EngineStateHandler {
-    pub fn lock(&self) -> Result<MutexGuard<'_, EngineState>, SystemError> {
-        Ok(self.mutex.lock()?)
-    }
-
-    pub fn wait_while<F: Fn(&EngineState) -> bool>(
-        &self,
-        f: F,
-    ) -> Result<MutexGuard<'_, EngineState>, SystemError> {
-        let lock = self.cond.wait_while(self.lock()?, |state| (f)(state))?;
-        Ok(lock)
-    }
+#[derive(Default, Clone, Copy, PartialEq, Debug)]
+pub enum EngineState {
+    #[default]
+    Uninitialized,
+    Initialized,
+    InEditor,
+    Running,
+    Stopped,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
+pub(crate) struct TickingThreads {
+    ticking: HashSet<ThreadId>,
+    ticked: HashSet<ThreadId>,
+    allow_new_frame: bool,
+}
+
+pub(crate) struct EngineData {
+    system_create_queue: Vec<(SystemData, SystemId)>,
+    system_destroy_queue: Vec<SystemId>,
+    thread_data: HashMap<ThreadId, Arc<RwLock<ThreadData>>>,
+    all_systems: HashMap<SystemId, Arc<RwLock<SystemData>>>,
+    /// Will be incremented by each thread at the end of their ticks
+    /// Engine will reset at end of frame when every thread is done
+    ticking_threads: TickingThreads,
+    state: EngineState,
+    scheduler: Box<dyn SystemScheduler>,
+}
+
 pub struct I131 {
-    systems: SystemManager,
-    state: EngineStateHandler,
+    engine: Weak<Self>,
+    state: (Mutex<EngineData>, Condvar),
 }
 
-unsafe impl Sync for I131 {}
 unsafe impl Send for I131 {}
+unsafe impl Sync for I131 {}
 
 impl I131 {
-    pub fn new() -> Arc<Self> {
-        Arc::new_cyclic(|engine| Self {
-            systems: SystemManager::new(engine.clone()),
-            state: EngineStateHandler::default(),
-        })
+    pub fn new(
+        num_threads: usize,
+        scheduler: Box<dyn SystemScheduler>,
+    ) -> Result<Arc<Self>, SystemError> {
+        let engine = Arc::new_cyclic(|engine| Self {
+            engine: engine.clone(),
+            state: (
+                Mutex::new(EngineData {
+                    system_create_queue: Vec::new(),
+                    system_destroy_queue: Vec::new(),
+                    thread_data: HashMap::new(),
+                    all_systems: HashMap::new(),
+                    ticking_threads: TickingThreads::default(),
+                    state: EngineState::default(),
+                    scheduler,
+                }),
+                Condvar::new(),
+            ),
+        });
+
+        for _ in 0..num_threads {
+            engine.create_thread()?;
+        }
+
+        Ok(engine)
     }
 
-    pub fn systems(&self) -> &SystemManager {
-        &self.systems
+    pub fn main_loop(&self) -> Result<(), SystemError> {
+        self.run()?;
+        loop {
+            {
+                let mut lock = self.lock()?;
+                if lock.all_systems.is_empty() && lock.state == EngineState::Stopped {
+                    println!("Stopping engine");
+                    break;
+                }
+                lock.ticking_threads.allow_new_frame = true;
+            }
+            self.notify_all();
+
+            {
+                let mut lock = self.wait_while(|data| {
+                    data.ticking_threads.ticking.len() < data.thread_data.len()
+                })?;
+                lock.ticking_threads.allow_new_frame = false;
+            }
+
+            {
+                // First check to destroy systems
+                let mut lock = self.wait_while(|data| {
+                    data.thread_data
+                        .iter()
+                        .any(|(thread_id, _)| !data.ticking_threads.ticked.contains(thread_id))
+                })?;
+                lock.ticking_threads.ticked.clear();
+                lock.ticking_threads.ticking.clear();
+            };
+
+            self.process_create_and_destroy_queues()?;
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn wait_until_end_of_frame(
+        &self,
+    ) -> Result<MutexGuard<'_, EngineData>, SystemError> {
+        self.wait_while(|data| {
+            !data.ticking_threads.ticking.is_empty()
+                || !data.ticking_threads.ticked.is_empty()
+                || data.ticking_threads.allow_new_frame
+        })
+    }
+    pub(crate) fn wait_while<F: FnMut(&mut EngineData) -> bool>(
+        &self,
+        f: F,
+    ) -> Result<MutexGuard<'_, EngineData>, SystemError> {
+        let lock = self.state.1.wait_while(self.state.0.lock()?, f)?;
+        Ok(lock)
+    }
+    pub(crate) fn lock(&self) -> Result<MutexGuard<'_, EngineData>, SystemError> {
+        Ok(self.state.0.lock()?)
+    }
+    pub(crate) fn notify_all(&self) {
+        self.state.1.notify_all();
     }
 }

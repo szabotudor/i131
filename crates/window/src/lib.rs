@@ -1,3 +1,12 @@
+#[derive(Debug, Error)]
+pub enum WindowError {
+    #[error("{0}")]
+    WindowCreateError(String),
+
+    #[error("{0}")]
+    GLFWInitError(#[from] glfw::InitError),
+}
+
 #[derive(Debug, Copy, Clone)]
 pub enum WindowMode {
     Windowed,
@@ -55,3 +64,4 @@ pub mod glfw_manager;
 #[cfg(feature = "GLFW")]
 pub use glfw_manager::*;
 use math131::Vec2u32;
+use thiserror::Error;

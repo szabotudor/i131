@@ -8,7 +8,6 @@ math131.workspace = true
 renderer131.workspace = true
 window131.workspace = true
 
-anyhow.workspace = true
 thiserror.workspace = true
 
 [features]
