@@ -343,12 +343,19 @@ impl I131 {
                         .map(|system| Ok(system.write()?))
                         .collect::<Result<Vec<_>, SystemError>>()?;
 
-                    // TODO: In rare cases, a system's update function might have time to run before
-                    // one of its dependencies on another thread has time to lock
-                    //
-                    // Should add another sync step here, but that might be too expensive, when
-                    // threads already need to syncronize once earlier when the engine signals the
-                    // new frame is allowed
+                    {
+                        let mut lock = engine.lock()?;
+                        lock.ticking_threads.locks_acquired.insert(thread_id);
+                    }
+                    engine.notify_all();
+
+                    {
+                        let _lock = engine.wait_until(|data| {
+                            data.thread_data
+                                .keys()
+                                .all(|id| data.ticking_threads.locks_acquired.contains(id))
+                        })?;
+                    }
 
                     Self::thread_tick(&engine, state, systems)?;
                 }

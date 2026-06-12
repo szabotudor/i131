@@ -31,6 +31,7 @@ pub enum EngineState {
 pub(crate) struct TickingThreads {
     ticking: HashSet<ThreadId>,
     ticked: HashSet<ThreadId>,
+    locks_acquired: HashSet<ThreadId>,
 }
 
 pub(crate) struct EngineData {
@@ -92,6 +93,7 @@ impl I131 {
                 }
                 lock.ticking_threads.ticked.clear();
                 lock.ticking_threads.ticking.clear();
+                lock.ticking_threads.locks_acquired.clear();
             }
             self.notify_all();
 
