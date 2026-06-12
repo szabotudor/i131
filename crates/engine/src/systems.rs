@@ -247,14 +247,10 @@ impl dyn System {
 impl I131 {
     fn thread_tick(
         engine: &Arc<I131>,
-        thread_data: &Arc<RwLock<ThreadData>>,
+        engine_state: EngineState,
+        mut systems: Vec<RwLockWriteGuard<'_, SystemData>>,
     ) -> Result<(), SystemError> {
-        let thread_data = thread_data.read()?;
-
-        let engine_state = engine.lock()?.state;
-
-        for system_data in &thread_data.system_data {
-            let mut system_data = system_data.write()?;
+        while let Some(mut system_data) = systems.pop() {
             let engine: &I131 = engine;
 
             if (engine_state == EngineState::Initialized
@@ -338,7 +334,24 @@ impl I131 {
                     lock.ticking_threads.ticking.insert(thread_id);
                 }
 
-                Self::thread_tick(&engine, &thread_data)?;
+                {
+                    let data = thread_data.read()?;
+                    let systems = data
+                        .system_data
+                        .iter()
+                        .rev()
+                        .map(|system| Ok(system.write()?))
+                        .collect::<Result<Vec<_>, SystemError>>()?;
+
+                    // TODO: In rare cases, a system's update function might have time to run before
+                    // one of its dependencies on another thread has time to lock
+                    //
+                    // Should add another sync step here, but that might be too expensive, when
+                    // threads already need to syncronize once earlier when the engine signals the
+                    // new frame is allowed
+
+                    Self::thread_tick(&engine, state, systems)?;
+                }
 
                 {
                     let mut lock = engine.lock()?;
