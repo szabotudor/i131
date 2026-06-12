@@ -97,11 +97,10 @@ impl I131 {
 
             {
                 // Just need to wait until all threads are done
-                let _lock = self.wait_while(|data| {
-                    data.thread_data.iter().any(|(thread_id, _)| {
-                        !(data.ticking_threads.ticked.contains(thread_id)
-                            && data.ticking_threads.ticking.contains(thread_id))
-                    })
+                let _lock = self.wait_until(|data| {
+                    data.thread_data
+                        .iter()
+                        .all(|(thread_id, _)| data.ticking_threads.ticked.contains(thread_id))
                 })?;
             };
 
@@ -114,8 +113,10 @@ impl I131 {
     pub(crate) fn wait_until_end_of_frame(
         &self,
     ) -> Result<MutexGuard<'_, EngineData>, SystemError> {
-        self.wait_while(|data| {
-            !data.ticking_threads.ticking.is_empty() || !data.ticking_threads.ticked.is_empty()
+        self.wait_until(|data| {
+            data.thread_data
+                .iter()
+                .all(|(thread_id, _)| data.ticking_threads.ticked.contains(thread_id))
         })
     }
     pub(crate) fn wait_while<F: FnMut(&mut EngineData) -> bool>(
@@ -123,6 +124,13 @@ impl I131 {
         f: F,
     ) -> Result<MutexGuard<'_, EngineData>, SystemError> {
         let lock = self.state.1.wait_while(self.state.0.lock()?, f)?;
+        Ok(lock)
+    }
+    pub(crate) fn wait_until<F: FnMut(&mut EngineData) -> bool>(
+        &self,
+        mut f: F,
+    ) -> Result<MutexGuard<'_, EngineData>, SystemError> {
+        let lock = self.state.1.wait_while(self.state.0.lock()?, |d| !f(d))?;
         Ok(lock)
     }
     pub(crate) fn lock(&self) -> Result<MutexGuard<'_, EngineData>, SystemError> {

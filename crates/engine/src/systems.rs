@@ -5,7 +5,7 @@ use std::{
     ops::{Deref, DerefMut},
     sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard},
     thread::JoinHandle,
-    time::{SystemTime, SystemTimeError},
+    time::{Duration, SystemTime, SystemTimeError},
 };
 
 use crate::{EngineState, I131};
@@ -329,18 +329,14 @@ impl I131 {
 
                 (thread_data, engine_data.state)
             };
-            engine.notify_all();
 
             while state == EngineState::Running {
                 // Wait until the engine signals the next frame to start
                 {
-                    let mut lock = engine.wait_while(|data| {
-                        data.ticking_threads.ticking.contains(&thread_id)
-                            || data.ticking_threads.ticked.contains(&thread_id)
-                    })?;
+                    let mut lock = engine
+                        .wait_while(|data| data.ticking_threads.ticking.contains(&thread_id))?;
                     lock.ticking_threads.ticking.insert(thread_id);
                 }
-                engine.notify_all();
 
                 Self::thread_tick(&engine, &thread_data)?;
 
@@ -350,6 +346,8 @@ impl I131 {
                     state = lock.state;
                 }
                 engine.notify_all();
+
+                // println!("Finished frame on {thread_id:?}");
             }
 
             Ok(())
@@ -404,6 +402,12 @@ impl I131 {
             lock.state = EngineState::Running;
         }
         self.notify_all();
+
+        let _lock = self.wait_while(|data| {
+            data.thread_data
+                .iter()
+                .all(|(thread_id, _)| data.ticking_threads.ticking.contains(thread_id))
+        })?;
         Ok(())
     }
 

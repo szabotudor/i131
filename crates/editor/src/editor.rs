@@ -26,6 +26,7 @@ impl System for Editor {
         delta: f32,
     ) -> Result<(), engine131::systems::SystemError> {
         let _ = (engine, delta);
+        println!("{delta}");
         Ok(())
     }
 
@@ -35,6 +36,7 @@ impl System for Editor {
         delta: f32,
     ) -> Result<(), engine131::systems::SystemError> {
         let _ = (engine, delta);
+        println!("{delta}");
         Ok(())
     }
 
