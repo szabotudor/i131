@@ -3,14 +3,18 @@ use glfw::{Context, Glfw, GlfwReceiver, PWindow, WindowEvent};
 use crate::WindowError;
 
 pub struct WindowDataGLFW {
-    glfw: Glfw,
-    window: PWindow,
-    events: GlfwReceiver<(f64, WindowEvent)>,
+    pub glfw: Glfw,
+    pub window: PWindow,
+    pub events: GlfwReceiver<(f64, WindowEvent)>,
 }
 
 impl super::Window {
     fn glfw_error_callback(error: glfw::Error, message: String) {
         println!("GLFW error:\n{error}\n  - {message}");
+    }
+
+    pub fn get_glfw_data(&self) -> &WindowDataGLFW {
+        &self.data
     }
 
     pub fn new(settings: super::WindowSettings) -> Result<Self, WindowError> {

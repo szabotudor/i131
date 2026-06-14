@@ -6,3 +6,5 @@ edition.workspace = true
 [dependencies]
 window131 = { workspace = true }
 
+thiserror.workspace = true
+
