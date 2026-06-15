@@ -8,6 +8,8 @@ members = [
     "crates/renderer",
 
     "crates/engine",
+    "crates/plugin-interface",
+    "crates/test-plugin",
     "crates/math",
     "crates/window",
     "crates/editor",
@@ -18,6 +20,8 @@ members = [
 vulkan-renderer = { version = "0.1.0", path = "./crates/vulkan-renderer" }
 
 engine131 = { version = "0.1.0", path = "./crates/engine" }
+plugin-interface = { version = "0.1.0", path = "./crates/plugin-interface" }
+test-plugin = { version = "0.1.0", path = "./crates/test-plugin" }
 math131 = { version = "0.1.0", path = "./crates/math", features = [ "SIMD" ] }
 renderer131 = { version = "0.1.0", path = "./crates/renderer" }
 window131 = { version = "0.1.0", path = "./crates/window", features = [ "GLFW" ] }
