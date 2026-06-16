@@ -1,32 +1,59 @@
 use crate::{
     I131,
-    systems::{System, SystemError},
+    systems::{OptionSystemError, System, SystemError},
 };
 use libloading::{Library, Symbol};
 use plugin_interface::{
     EngineInterface, EngineInterfaceData, PluginInfo,
+    systems::SystemVTable,
     utils::{SafeResult, SafeString},
 };
-use std::{collections::HashMap, os::raw::c_void, path::Path};
+use std::{collections::HashMap, os::raw::c_void, path::Path, sync::Arc};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum PluginError {
     #[error("Error while loading library: {0}")]
     LibraryLoadError(#[from] libloading::Error),
+
     #[error("Error while initializing plugin: {0}")]
     PluginInitError(String),
+
+    #[error("Invalid engine")]
+    InvalidEngineError,
+}
+pub trait OptionPluginError<T> {
+    fn ok_or_plugin_error(self, err: PluginError) -> Result<T, PluginError>;
+}
+impl<T> OptionPluginError<T> for Option<T> {
+    fn ok_or_plugin_error(self, err: PluginError) -> Result<T, PluginError> {
+        if let Some(opt) = self {
+            Ok(opt)
+        } else {
+            Err(err)
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_create_system(
+    engine: *const c_void,
+    system_id: SystemVTable,
+) -> SafeResult<(), SafeString> {
+    todo!()
 }
 
 type PluginMetadataFn = extern "C" fn() -> PluginInfo;
 type PluginEntryFn = extern "C" fn(&EngineInterface) -> SafeResult<(), SafeString>;
 pub(crate) struct Plugin {
     lib: Library,
+    engine_hold: Arc<I131>,
+    interface: EngineInterface,
     plugin_metadata: Symbol<'static, PluginMetadataFn>,
     plugin_entry: Symbol<'static, PluginEntryFn>,
 }
 impl Plugin {
-    fn new(path: &Path) -> Result<Self, PluginError> {
+    fn new(path: &Path, engine: &I131) -> Result<Self, PluginError> {
         unsafe {
             let lib = Library::new(path)?;
             let plugin_metadata = std::mem::transmute::<_, Symbol<'static, PluginMetadataFn>>(
@@ -38,8 +65,21 @@ impl Plugin {
                 )?,
             );
 
+            let engine_hold = engine
+                .engine
+                .upgrade()
+                .ok_or_plugin_error(PluginError::InvalidEngineError)?;
+
+            let engine = engine as *const I131 as *const c_void;
+            let interface = EngineInterface::new(EngineInterfaceData {
+                engine,
+                engine_create_system,
+            });
+
             Ok(Self {
                 lib,
+                engine_hold,
+                interface,
                 plugin_metadata,
                 plugin_entry,
             })
@@ -49,10 +89,8 @@ impl Plugin {
     fn plugin_metadata(&self) -> PluginInfo {
         (self.plugin_metadata)()
     }
-    fn plugin_entry(&self, engine: &I131) -> Result<(), PluginError> {
-        let engine = engine as *const I131 as *const c_void;
-        let interface = EngineInterface::new(EngineInterfaceData { engine });
-        (self.plugin_entry)(&interface)
+    fn plugin_entry(&self) -> Result<(), PluginError> {
+        (self.plugin_entry)(&self.interface)
             .to_result()
             .map_err(|err| PluginError::PluginInitError(err.to_string()))
     }
@@ -62,6 +100,8 @@ impl Plugin {
 pub(crate) struct PluginManager {
     plugins: HashMap<String, Plugin>,
 }
+unsafe impl Sync for PluginManager {}
+unsafe impl Send for PluginManager {}
 
 #[cfg(target_os = "linux")]
 const LIB_EXT: &str = "so";
@@ -82,9 +122,9 @@ impl System for PluginManager {
             .collect::<Result<Vec<_>, SystemError>>()?;
 
         for lib_file in lib_files {
-            let plugin = Plugin::new(&lib_file)?;
+            let plugin = Plugin::new(&lib_file, engine)?;
             let metadata = plugin.plugin_metadata();
-            plugin.plugin_entry(engine)?;
+            plugin.plugin_entry()?;
             self.plugins.insert(metadata.name.to_string(), plugin);
         }
 
