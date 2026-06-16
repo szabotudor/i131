@@ -1,3 +1,5 @@
+use std::env::current_exe;
+
 use engine131::{I131, schedulers::DAGScheduler};
 
 use crate::editor::Editor;
@@ -20,7 +22,9 @@ impl<T, E: std::fmt::Display> ResultPrint<T> for Result<T, E> {
 }
 
 fn main() -> Result<(), i32> {
-    let engine = I131::new(3, Box::new(DAGScheduler::new())).print()?;
+    let plugin_path = current_exe().print()?.parent().unwrap().join("plugins");
+
+    let engine = I131::new(3, Box::new(DAGScheduler::new()), plugin_path).print()?;
     println!("Created engine");
 
     engine.initialize().print()?;

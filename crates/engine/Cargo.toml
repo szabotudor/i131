@@ -5,9 +5,11 @@ edition.workspace = true
 
 [dependencies]
 math131.workspace = true
+plugin-interface.workspace = true
 renderer131.workspace = true
 window131.workspace = true
 
+libloading.workspace = true
 thiserror.workspace = true
 
 [features]

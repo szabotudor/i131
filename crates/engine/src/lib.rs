@@ -4,6 +4,7 @@ pub mod systems;
 
 use std::{
     collections::{HashMap, HashSet},
+    path::PathBuf,
     sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, Weak},
     thread::ThreadId,
 };
@@ -49,6 +50,7 @@ pub(crate) struct EngineData {
 pub struct I131 {
     engine: Weak<Self>,
     state: (Mutex<EngineData>, Condvar),
+    pub(crate) plugin_search_path: PathBuf,
 }
 
 unsafe impl Send for I131 {}
@@ -58,6 +60,7 @@ impl I131 {
     pub fn new(
         num_threads: usize,
         scheduler: Box<dyn SystemScheduler>,
+        plugin_search_path: PathBuf,
     ) -> Result<Arc<Self>, SystemError> {
         let engine = Arc::new_cyclic(|engine| Self {
             engine: engine.clone(),
@@ -73,6 +76,7 @@ impl I131 {
                 }),
                 Condvar::new(),
             ),
+            plugin_search_path,
         });
 
         for _ in 0..num_threads {

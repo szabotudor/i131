@@ -3,12 +3,16 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::{Debug, Display},
     ops::{Deref, DerefMut},
+    path::PathBuf,
     sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard},
     thread::JoinHandle,
     time::{SystemTime, SystemTimeError},
 };
 
-use crate::{EngineState, I131};
+use crate::{
+    EngineState, I131,
+    builtin::plugin_manager::{PluginError, PluginManager},
+};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -42,6 +46,12 @@ pub enum SystemError {
 
     #[error("System time error: {0}")]
     StstemTimeError(#[from] SystemTimeError),
+
+    #[error("IO Error: {0}")]
+    IoError(#[from] std::io::Error),
+
+    #[error("Plugin Error: {0}")]
+    PluginError(#[from] PluginError),
 }
 pub trait OptionSystemError<T> {
     fn ok_or_system_error(self, err: SystemError) -> Result<T, SystemError>;
@@ -180,8 +190,18 @@ impl Debug for ThreadData {
     }
 }
 
-#[derive(PartialEq, Eq, Default, Debug, Clone, Copy, Hash)]
-pub struct SystemId(pub &'static str);
+#[derive(PartialEq, Eq, Default, Debug, Clone, Hash)]
+pub struct SystemId(pub String);
+impl From<String> for SystemId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for SystemId {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
 impl Display for SystemId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
@@ -399,6 +419,8 @@ impl I131 {
                 ));
             }
 
+            self.create_system(PluginManager::default())?;
+
             // TODO: Internal system init
             // Will add built-in systems here
 
@@ -443,9 +465,9 @@ impl I131 {
                         .read()?
                         .dependencies
                         .iter()
-                        .copied()
+                        .cloned()
                         .collect::<HashSet<_>>();
-                    Ok((*sys, deps))
+                    Ok((sys.clone(), deps))
                 },
             )
             .collect::<Result<HashMap<SystemId, HashSet<SystemId>>, SystemError>>()?;
@@ -461,7 +483,7 @@ impl I131 {
                         .all_systems
                         .get(sys)
                         .cloned()
-                        .ok_or_system_error(SystemError::MissingSystem(*sys))
+                        .ok_or_system_error(SystemError::MissingSystem(sys.clone()))
                 })
                 .collect::<Result<Vec<_>, SystemError>>()?;
             thread_data.system_data = systems;
@@ -498,12 +520,12 @@ impl I131 {
             }
 
             let destroy_queue = state.system_destroy_queue.drain(..).collect::<Vec<_>>();
-            for sys_id in destroy_queue {
+            for sys_id in &destroy_queue {
                 {
                     let mut system_data = state
                         .all_systems
                         .get(&sys_id)
-                        .ok_or_system_error(SystemError::MissingSystem(sys_id))?
+                        .ok_or_system_error(SystemError::MissingSystem(sys_id.clone()))?
                         .write()?;
                     if !system_data.destroyed {
                         if system_data.playing {
@@ -534,7 +556,7 @@ impl I131 {
         let system = state
             .all_systems
             .get(system_id)
-            .ok_or_system_error(SystemError::MissingSystem(*system_id))?
+            .ok_or_system_error(SystemError::MissingSystem(system_id.clone()))?
             .clone();
 
         Ok(SystemAccess::new(system))
