@@ -3,7 +3,6 @@ use std::{
     fmt::Display,
     mem::ManuallyDrop,
     ptr::null,
-    str::FromStr,
 };
 
 pub unsafe extern "C" fn dealloc_safe_string(data: *mut u8, len: usize) {
@@ -96,6 +95,18 @@ impl<T, E> SafeResult<T, E> {
             data: SafeResultData {
                 err: ManuallyDrop::new(err),
             },
+        }
+    }
+
+    pub fn to_result(mut self) -> Result<T, E> {
+        unsafe {
+            if self.code == 0 {
+                let ok = ManuallyDrop::take(&mut self.data.ok);
+                Ok(ok)
+            } else {
+                let err = ManuallyDrop::take(&mut self.data.err);
+                Err(err)
+            }
         }
     }
 }

@@ -9,6 +9,15 @@ pub struct PluginInfo {
 }
 
 #[repr(C)]
+pub struct EngineInterfaceData {
+    pub engine: *const c_void,
+}
+#[repr(C)]
 pub struct EngineInterface {
-    engine: *const c_void,
+    data: EngineInterfaceData,
+}
+impl EngineInterface {
+    pub fn new(data: EngineInterfaceData) -> Self {
+        Self { data }
+    }
 }
