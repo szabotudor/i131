@@ -18,20 +18,35 @@ pub struct SafeString {
     len: usize,
     dealloc: unsafe extern "C" fn(*mut u8, usize),
 }
-impl FromStr for SafeString {
-    type Err = std::io::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+impl From<&str> for SafeString {
+    fn from(value: &str) -> Self {
         unsafe {
-            let len = s.len();
-            let layout = Layout::from_size_align_unchecked(s.len(), align_of::<u8>());
+            let len = value.len();
+            let layout = Layout::from_size_align_unchecked(len, align_of::<u8>());
             let data = alloc(layout);
-            std::ptr::copy(s.as_ptr(), data, len);
-            Ok(Self {
+            std::ptr::copy(value.as_ptr(), data, len);
+            Self {
                 data,
                 len,
                 dealloc: dealloc_safe_string,
-            })
+            }
+        }
+    }
+}
+impl From<String> for SafeString {
+    fn from(value: String) -> Self {
+        let s = Box::leak(value.into_boxed_str());
+        let layout_old = Layout::for_value(s);
+        let len = layout_old.size();
+        debug_assert!(
+            layout_old.align() == align_of::<u8>(),
+            "String alignment is wrong. Could not safely create layout"
+        );
+        let data = s.as_ptr();
+        Self {
+            data,
+            len,
+            dealloc: dealloc_safe_string,
         }
     }
 }
