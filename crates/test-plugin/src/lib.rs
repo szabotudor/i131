@@ -1,5 +1,3 @@
-use std::str::FromStr;
-
 use plugin_interface::{
     EngineInterface, PluginInfo,
     utils::{SafeResult, SafeString},
