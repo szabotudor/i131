@@ -3,7 +3,6 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::{Debug, Display},
     ops::{Deref, DerefMut},
-    path::PathBuf,
     sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard},
     thread::JoinHandle,
     time::{SystemTime, SystemTimeError},

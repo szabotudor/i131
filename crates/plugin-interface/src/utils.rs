@@ -121,3 +121,22 @@ impl<T, E> Drop for SafeResult<T, E> {
         }
     }
 }
+
+#[repr(C)]
+pub struct SafeError {
+    pub code: i32,
+    pub message: SafeString,
+}
+impl SafeError {
+    pub fn new(code: i32, message: SafeString) -> Self {
+        Self { code, message }
+    }
+}
+
+/// T must be #[repr(C)], otherwise risks ABI incompatibility
+#[repr(C)]
+pub struct SafeVec<T> {
+    data: *const T,
+    len: usize,
+    capacity: usize,
+}
