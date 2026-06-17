@@ -1,6 +1,6 @@
 use crate::{
     systems::{SystemInterface, SystemVTable},
-    utils::{SafeResult, SafeString},
+    utils::{SafeError, SafeResult, SafeString},
 };
 use std::ffi::c_void;
 
@@ -12,8 +12,7 @@ pub struct PluginInfo {
     pub name: SafeString,
 }
 
-type EngineCreateSystemFn =
-    extern "C" fn(*const c_void, SystemVTable) -> SafeResult<(), SafeString>;
+type EngineCreateSystemFn = extern "C" fn(*const c_void, SystemVTable) -> SafeResult<(), SafeError>;
 #[repr(C)]
 pub struct EngineInterfaceData {
     pub engine: *const c_void,
@@ -28,7 +27,9 @@ impl EngineInterface {
         Self { data }
     }
 
-    pub fn create_system<T: SystemInterface>(&self, system: T) -> SafeResult<(), SafeString> {
+    pub fn create_system<T: SystemInterface>(&self, system: T) -> Result<(), SafeError> {
+        let system = Box::<dyn SystemInterface>::from(Box::new(system));
+        let system_ptr = system.as_ref() as *const dyn SystemInterface;
         todo!()
     }
 }

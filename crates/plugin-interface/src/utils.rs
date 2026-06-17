@@ -1,6 +1,6 @@
 use std::{
     alloc::{Layout, alloc, dealloc},
-    fmt::Display,
+    fmt::{Debug, Display},
     mem::ManuallyDrop,
     ptr::null,
 };
@@ -56,6 +56,11 @@ impl Display for SafeString {
             let s = str::from_utf8_unchecked(s);
             write!(f, "{s}")
         }
+    }
+}
+impl Debug for SafeString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self}")
     }
 }
 impl Drop for SafeString {
@@ -131,6 +136,7 @@ impl<T, E> From<Result<T, E>> for SafeResult<T, E> {
 }
 
 #[repr(C)]
+#[derive(Debug)]
 pub struct SafeError {
     pub code: i32,
     pub message: SafeString,
@@ -138,6 +144,14 @@ pub struct SafeError {
 impl SafeError {
     pub fn new(code: i32, message: SafeString) -> Self {
         Self { code, message }
+    }
+}
+impl Display for SafeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SafeError")
+            .field("code", &self.code)
+            .field("message", &self.message)
+            .finish()
     }
 }
 
