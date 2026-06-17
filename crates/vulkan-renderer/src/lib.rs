@@ -1,8 +1,5 @@
-use std::os::raw::c_void;
-
 use ash::vk::{
-    API_VERSION_1_3, ApplicationInfo, InstanceCreateInfo, TaggedStructure, api_version_variant,
-    make_api_version,
+    API_VERSION_1_3, ApplicationInfo, InstanceCreateInfo, TaggedStructure, make_api_version,
 };
 use renderer131::{OptionRendererError, Renderer, RendererError};
 use thiserror::Error;
