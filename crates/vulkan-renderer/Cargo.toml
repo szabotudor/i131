@@ -9,3 +9,7 @@ window131.workspace = true
 
 ash.workspace = true
 thiserror.workspace = true
+
+[features]
+GLFW = []
+

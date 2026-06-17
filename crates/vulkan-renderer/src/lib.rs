@@ -3,7 +3,7 @@ use ash::vk::{
 };
 use renderer131::{OptionRendererError, Renderer, RendererError};
 use thiserror::Error;
-use window131::Window;
+use window131::WindowDataGLFW;
 
 #[derive(Error, Debug)]
 pub enum VulkanRendererError {}
@@ -12,12 +12,13 @@ pub enum VulkanRendererError {}
 pub struct VulkanRenderer {}
 
 impl VulkanRenderer {
-    pub fn new(
+    #[cfg(feature = "GLFW")]
+    pub fn new_glfw(
         name: &str,
         app_version: (u32, u32, u32),
-        window: &Window,
+        window: &WindowDataGLFW,
     ) -> Result<Self, RendererError> {
-        let appinfo = ApplicationInfo {
+        let app_info = ApplicationInfo {
             s_type: ApplicationInfo::STRUCTURE_TYPE,
             p_application_name: name as *const str as *const i8,
             application_version: make_api_version(0, app_version.0, app_version.1, app_version.2),
@@ -28,8 +29,7 @@ impl VulkanRenderer {
         };
 
         let create_info = {
-            let glfw = window.get_glfw_data();
-            let required_extensions = glfw
+            let required_extensions = window
                 .glfw
                 .get_required_instance_extensions()
                 .ok_or_renderer_error(RendererError::InitError(
@@ -38,7 +38,7 @@ impl VulkanRenderer {
 
             InstanceCreateInfo {
                 s_type: InstanceCreateInfo::STRUCTURE_TYPE,
-                p_application_info: &appinfo as *const ApplicationInfo,
+                p_application_info: &app_info as *const ApplicationInfo,
                 enabled_extension_count: required_extensions.len() as u32,
                 pp_enabled_extension_names: required_extensions.as_ptr() as *const *const i8,
                 enabled_layer_count: 0,

@@ -14,9 +14,10 @@ members = [
 ]
 
 [workspace.dependencies]
-# Local crates
-vulkan-renderer = { version = "0.1.0", path = "./crates/vulkan-renderer" }
+# Built-in plugins
+vulkan-renderer = { version = "0.1.0", path = "./crates/vulkan-renderer", features = [ "GLFW" ] }
 
+# Local crates
 engine131 = { version = "0.1.0", path = "./crates/engine" }
 math131 = { version = "0.1.0", path = "./crates/math", features = [ "SIMD" ] }
 renderer131 = { version = "0.1.0", path = "./crates/renderer" }
