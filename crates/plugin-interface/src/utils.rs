@@ -121,6 +121,14 @@ impl<T, E> Drop for SafeResult<T, E> {
         }
     }
 }
+impl<T, E> From<Result<T, E>> for SafeResult<T, E> {
+    fn from(value: Result<T, E>) -> Self {
+        match value {
+            Ok(ok) => Self::ok(ok),
+            Err(err) => Self::err(err, -1),
+        }
+    }
+}
 
 #[repr(C)]
 pub struct SafeError {

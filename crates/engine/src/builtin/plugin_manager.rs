@@ -1,6 +1,6 @@
 use crate::{
     I131,
-    systems::{OptionSystemError, System, SystemError},
+    systems::{System, SystemError},
 };
 use libloading::{Library, Symbol};
 use plugin_interface::{
