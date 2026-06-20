@@ -190,7 +190,7 @@ impl Display for SystemId {
 
 pub trait System
 where
-    Self: Send + Sync + Any,
+    Self: Send + Any,
 {
     /// Initialize the system.
     ///

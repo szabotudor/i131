@@ -7,6 +7,7 @@ pub struct WindowDataGLFW {
     pub window: PWindow,
     pub events: GlfwReceiver<(f64, WindowEvent)>,
 }
+unsafe impl Send for WindowDataGLFW {}
 
 impl super::Window {
     fn glfw_error_callback(error: glfw::Error, message: String) {
