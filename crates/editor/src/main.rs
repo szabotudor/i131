@@ -26,7 +26,7 @@ fn main() -> Result<(), i32> {
     engine.initialize().print()?;
     println!("Initialized engine");
 
-    engine.create_system(Editor::default()).print()?;
+    engine.create_system(Editor::new().print()?).print()?;
     println!("Opened editor");
 
     engine.main_loop().print()?;
