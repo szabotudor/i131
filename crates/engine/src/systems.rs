@@ -71,6 +71,8 @@ pub(crate) struct SystemData {
     pub(crate) system: Box<dyn System>,
     pub(crate) dependencies: &'static [SystemId],
 }
+unsafe impl Send for SystemData {}
+unsafe impl Sync for SystemData {}
 impl SystemData {
     pub(crate) fn new<T: System + 'static>(system: T) -> Self {
         Self {
@@ -171,6 +173,8 @@ pub(crate) struct ThreadData {
     system_data: Vec<Arc<RwLock<SystemData>>>,
     join_handle: JoinHandle<Result<(), SystemError>>,
 }
+unsafe impl Sync for ThreadData {}
+unsafe impl Send for ThreadData {}
 
 impl Debug for ThreadData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -260,6 +260,7 @@ name = "editor131"
 version = "0.1.0"
 dependencies = [
  "engine131",
+ "thiserror",
  "vulkan-renderer",
 ]
 
