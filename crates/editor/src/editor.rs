@@ -29,7 +29,7 @@ impl Editor {
                 .with_mode(WindowMode::Windowed),
         )?;
         let renderer =
-            VulkanRenderer::new_glfw("I131_VulkanBackend", (1, 3, 0), window.get_glfw_data())?;
+            VulkanRenderer::new_glfw("I131_VulkanBackend", (1, 0, 0), window.get_glfw_data())?;
 
         Ok(Self {
             window,
@@ -62,6 +62,9 @@ impl System for Editor {
     ) -> Result<(), engine131::systems::SystemError> {
         let _ = (engine, delta);
         self.window.update();
+        if self.window.should_close() {
+            engine.destroy_system(Self::system_id())?;
+        }
         Ok(())
     }
 
@@ -72,6 +75,9 @@ impl System for Editor {
     ) -> Result<(), engine131::systems::SystemError> {
         let _ = (engine, delta);
         self.window.update();
+        if self.window.should_close() {
+            engine.destroy_system(Self::system_id())?;
+        }
         Ok(())
     }
 

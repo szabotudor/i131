@@ -1,3 +1,5 @@
+use std::fmt::{Debug, Display};
+
 use thiserror::Error;
 pub use window131::Window;
 
@@ -5,7 +7,24 @@ pub use window131::Window;
 pub enum RendererError {
     #[error("Failed to initialize renderer: {0}")]
     InitError(String),
+
+    #[error("Error in renderer: {0}")]
+    InstanceError(Box<dyn RendererInstanceError>),
 }
+pub trait RendererInstanceError
+where
+    Self: Debug + Display,
+{
+}
+impl<T> From<T> for RendererError
+where
+    T: RendererInstanceError + 'static,
+{
+    fn from(value: T) -> Self {
+        RendererError::InstanceError(Box::new(value))
+    }
+}
+
 pub trait OptionRendererError<T> {
     fn ok_or_renderer_error(self, err: RendererError) -> Result<T, RendererError>;
 }
