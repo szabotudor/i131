@@ -20,6 +20,9 @@ pub(crate) struct Editor {
     window: Window,
     renderer: Box<dyn Renderer>,
 }
+unsafe impl Send for Editor {}
+unsafe impl Sync for Editor {}
+
 impl Editor {
     pub fn new() -> Result<Self, EditorError> {
         let window = Window::new(

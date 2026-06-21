@@ -53,11 +53,8 @@ impl super::Window {
         self.data.glfw.poll_events();
 
         for (_e, event) in glfw::flush_messages(&self.data.events) {
-            match event {
-                glfw::WindowEvent::Close => {
-                    self.should_close = true;
-                }
-                _ => {}
+            if event == glfw::WindowEvent::Close {
+                self.should_close = true;
             }
         }
 
