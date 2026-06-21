@@ -60,14 +60,27 @@ impl VulkanRenderer {
             ..Default::default()
         };
 
-        let entry = Entry::linked();
+        unsafe {
+            let entry = Entry::linked();
 
-        let instance = unsafe { entry.create_instance(&create_info, None)? };
+            panic!("Debug INFO");
+            let validation_layers = &["VK_LAYER_KRONOS_validation"];
 
-        Ok(Self {
-            _entry: entry,
-            instance,
-        })
+            let properties = entry.enumerate_instance_layer_properties()?;
+
+            let validation_layer = properties.iter().find(|layer| {
+                let layer_name =
+                    str::from_utf8_unchecked(std::mem::transmute(&layer.layer_name as &[i8]));
+                validation_layers.contains(&layer_name)
+            });
+
+            let instance = entry.create_instance(&create_info, None)?;
+
+            Ok(Self {
+                _entry: entry,
+                instance,
+            })
+        }
     }
     #[cfg(feature = "GLFW")]
     pub fn new_glfw(

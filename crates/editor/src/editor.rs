@@ -32,7 +32,7 @@ impl Editor {
                 .with_mode(WindowMode::Windowed),
         )?;
         let renderer =
-            VulkanRenderer::new_glfw("I131_VulkanBackend", (1, 0, 0), window.get_glfw_data())?;
+            VulkanRenderer::new_glfw("I131_VulkanBackend", (1, 3, 0), window.get_glfw_data())?;
 
         Ok(Self {
             window,
