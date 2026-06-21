@@ -1,9 +1,9 @@
 use std::time::{Duration, SystemTime};
 
 use engine131::{
+    I131,
     schedulers::DAGScheduler,
     systems::{System, SystemError, SystemId},
-    I131,
 };
 
 fn spin(n: u64) {
@@ -29,24 +29,47 @@ struct Sys0 {
 
 impl Sys0 {
     fn new() -> Self {
-        Self { tick: 0, rng: 0xdeadbeef_cafebabe }
+        Self {
+            tick: 0,
+            rng: 0xdeadbeef_cafebabe,
+        }
     }
 }
 
 impl System for Sys0 {
-    fn system_id() -> SystemId where Self: Sized { SystemId("sys0") }
-    fn dependencies() -> &'static [SystemId] where Self: Sized { &[] }
-    fn initialize(&mut self, _: &I131) -> Result<(), SystemError> { Ok(()) }
-    fn begin_play(&mut self, _: &I131) -> Result<(), SystemError> { Ok(()) }
+    fn system_id() -> SystemId
+    where
+        Self: Sized,
+    {
+        SystemId("sys0")
+    }
+    fn dependencies() -> &'static [SystemId]
+    where
+        Self: Sized,
+    {
+        &[]
+    }
+    fn initialize(&mut self, _: &I131) -> Result<(), SystemError> {
+        Ok(())
+    }
+    fn begin_play(&mut self, _: &I131) -> Result<(), SystemError> {
+        Ok(())
+    }
     fn update(&mut self, _: &I131, _: f32) -> Result<(), SystemError> {
         let n = (xorshift(&mut self.rng) % 300 + 50) * 1000;
         spin(n);
         self.tick += 1;
         Ok(())
     }
-    fn in_editor_update(&mut self, e: &I131, d: f32) -> Result<(), SystemError> { self.update(e, d) }
-    fn end_play(&mut self, _: &I131) -> Result<(), SystemError> { Ok(()) }
-    fn destroy(&mut self, _: &I131) -> Result<(), SystemError> { Ok(()) }
+    fn in_editor_update(&mut self, e: &I131, d: f32) -> Result<(), SystemError> {
+        self.update(e, d)
+    }
+    fn end_play(&mut self, _: &I131) -> Result<(), SystemError> {
+        Ok(())
+    }
+    fn destroy(&mut self, _: &I131) -> Result<(), SystemError> {
+        Ok(())
+    }
 }
 
 // sys1: deps=[sys0], must read sys0's current-frame tick
@@ -57,15 +80,32 @@ struct Sys1 {
 
 impl Sys1 {
     fn new() -> Self {
-        Self { tick: 0, rng: 0xc0ffee_facade }
+        Self {
+            tick: 0,
+            rng: 0xc0ffee_facade,
+        }
     }
 }
 
 impl System for Sys1 {
-    fn system_id() -> SystemId where Self: Sized { SystemId("sys1") }
-    fn dependencies() -> &'static [SystemId] where Self: Sized { &[SystemId("sys0")] }
-    fn initialize(&mut self, _: &I131) -> Result<(), SystemError> { Ok(()) }
-    fn begin_play(&mut self, _: &I131) -> Result<(), SystemError> { Ok(()) }
+    fn system_id() -> SystemId
+    where
+        Self: Sized,
+    {
+        SystemId("sys1")
+    }
+    fn dependencies() -> &'static [SystemId]
+    where
+        Self: Sized,
+    {
+        &[SystemId("sys0")]
+    }
+    fn initialize(&mut self, _: &I131) -> Result<(), SystemError> {
+        Ok(())
+    }
+    fn begin_play(&mut self, _: &I131) -> Result<(), SystemError> {
+        Ok(())
+    }
     fn update(&mut self, engine: &I131, _: f32) -> Result<(), SystemError> {
         self.tick += 1;
 
@@ -83,9 +123,15 @@ impl System for Sys1 {
         spin(n);
         Ok(())
     }
-    fn in_editor_update(&mut self, e: &I131, d: f32) -> Result<(), SystemError> { self.update(e, d) }
-    fn end_play(&mut self, _: &I131) -> Result<(), SystemError> { Ok(()) }
-    fn destroy(&mut self, _: &I131) -> Result<(), SystemError> { Ok(()) }
+    fn in_editor_update(&mut self, e: &I131, d: f32) -> Result<(), SystemError> {
+        self.update(e, d)
+    }
+    fn end_play(&mut self, _: &I131) -> Result<(), SystemError> {
+        Ok(())
+    }
+    fn destroy(&mut self, _: &I131) -> Result<(), SystemError> {
+        Ok(())
+    }
 }
 
 // sys2: deps=[sys0, sys1], must read both current-frame, destroys all after 10s
@@ -98,16 +144,31 @@ struct Sys2 {
 
 impl Sys2 {
     fn new() -> Self {
-        Self { tick: 0, rng: 0xabad1dea_deadc0de, start: SystemTime::UNIX_EPOCH, done: false }
+        Self {
+            tick: 0,
+            rng: 0xabad1dea_deadc0de,
+            start: SystemTime::UNIX_EPOCH,
+            done: false,
+        }
     }
 }
 
 impl System for Sys2 {
-    fn system_id() -> SystemId where Self: Sized { SystemId("sys2") }
-    fn dependencies() -> &'static [SystemId] where Self: Sized {
+    fn system_id() -> SystemId
+    where
+        Self: Sized,
+    {
+        SystemId("sys2")
+    }
+    fn dependencies() -> &'static [SystemId]
+    where
+        Self: Sized,
+    {
         &[SystemId("sys0"), SystemId("sys1")]
     }
-    fn initialize(&mut self, _: &I131) -> Result<(), SystemError> { Ok(()) }
+    fn initialize(&mut self, _: &I131) -> Result<(), SystemError> {
+        Ok(())
+    }
     fn begin_play(&mut self, _: &I131) -> Result<(), SystemError> {
         self.start = SystemTime::now();
         Ok(())
@@ -143,9 +204,15 @@ impl System for Sys2 {
 
         Ok(())
     }
-    fn in_editor_update(&mut self, e: &I131, d: f32) -> Result<(), SystemError> { self.update(e, d) }
-    fn end_play(&mut self, _: &I131) -> Result<(), SystemError> { Ok(()) }
-    fn destroy(&mut self, _: &I131) -> Result<(), SystemError> { Ok(()) }
+    fn in_editor_update(&mut self, e: &I131, d: f32) -> Result<(), SystemError> {
+        self.update(e, d)
+    }
+    fn end_play(&mut self, _: &I131) -> Result<(), SystemError> {
+        Ok(())
+    }
+    fn destroy(&mut self, _: &I131) -> Result<(), SystemError> {
+        Ok(())
+    }
 }
 
 #[test]
