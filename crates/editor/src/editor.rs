@@ -64,10 +64,13 @@ impl System for Editor {
         delta: f32,
     ) -> Result<(), engine131::systems::SystemError> {
         let _ = (engine, delta);
+
         self.window.update();
+
         if self.window.should_close() {
-            engine.destroy_system(Self::system_id())?;
+            engine.request_immediate_shutdown()?;
         }
+
         Ok(())
     }
 
@@ -77,10 +80,13 @@ impl System for Editor {
         delta: f32,
     ) -> Result<(), engine131::systems::SystemError> {
         let _ = (engine, delta);
+
         self.window.update();
+
         if self.window.should_close() {
-            engine.destroy_system(Self::system_id())?;
+            engine.request_immediate_shutdown()?;
         }
+
         Ok(())
     }
 

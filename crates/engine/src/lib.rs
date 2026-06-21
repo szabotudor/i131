@@ -35,8 +35,8 @@ pub(crate) struct TickingThreads {
 }
 
 pub(crate) struct EngineData {
-    system_create_queue: Vec<(SystemData, SystemId)>,
-    system_destroy_queue: Vec<SystemId>,
+    system_create_queue: HashMap<SystemId, SystemData>,
+    system_destroy_queue: HashSet<SystemId>,
     thread_data: HashMap<ThreadId, Arc<RwLock<ThreadData>>>,
     all_systems: HashMap<SystemId, Arc<RwLock<SystemData>>>,
     /// Will be incremented by each thread at the end of their ticks
@@ -63,8 +63,8 @@ impl I131 {
             engine: engine.clone(),
             state: (
                 Mutex::new(EngineData {
-                    system_create_queue: Vec::new(),
-                    system_destroy_queue: Vec::new(),
+                    system_create_queue: HashMap::new(),
+                    system_destroy_queue: HashSet::new(),
                     thread_data: HashMap::new(),
                     all_systems: HashMap::new(),
                     ticking_threads: TickingThreads::default(),
@@ -108,6 +108,13 @@ impl I131 {
 
             self.process_create_and_destroy_queues()?;
         }
+
+        Ok(())
+    }
+
+    pub fn request_immediate_shutdown(&self) -> Result<(), SystemError> {
+        let systems = self.lock()?.all_systems.keys().cloned().collect::<Vec<_>>();
+        self.destroy_systems(systems.into_iter())?;
 
         Ok(())
     }

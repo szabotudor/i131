@@ -19,6 +19,9 @@ pub enum SystemError {
     #[error("Engine state is invalid: {0}")]
     InvalidEngineState(String),
 
+    #[error("System already exists: {0}")]
+    SystemAlreadyExists(SystemId),
+
     #[error("System doesn't exist: \"{0}\"")]
     MissingSystem(SystemId),
 
@@ -478,15 +481,50 @@ impl I131 {
         let mut state = self.lock()?;
         let system_data = SystemData::new(system);
 
+        if state.system_create_queue.contains_key(&T::system_id())
+            || state.all_systems.contains_key(&T::system_id())
+        {
+            return Err(SystemError::SystemAlreadyExists(T::system_id()));
+        }
+
         state
             .system_create_queue
-            .push((system_data, T::system_id()));
+            .insert(T::system_id(), system_data);
 
         Ok(())
     }
     pub fn destroy_system(&self, system_id: SystemId) -> Result<(), SystemError> {
         let mut state = self.lock()?;
-        state.system_destroy_queue.push(system_id);
+
+        if !state.all_systems.contains_key(&system_id)
+            || state.system_destroy_queue.contains(&system_id)
+        {
+            return Err(SystemError::MissingSystem(system_id));
+        }
+
+        state.system_destroy_queue.insert(system_id);
+
+        Ok(())
+    }
+    pub fn destroy_systems<I: IntoIterator<Item = SystemId>>(
+        &self,
+        system_ids: I,
+    ) -> Result<(), SystemError> {
+        let mut state = self.lock()?;
+
+        let system_ids = system_ids.into_iter().collect::<Vec<_>>();
+
+        let any_missing_system = system_ids
+            .iter()
+            .find(|id| {
+                !state.all_systems.contains_key(&id) || state.system_destroy_queue.contains(&id)
+            })
+            .cloned();
+        if let Some(system_id) = any_missing_system {
+            return Err(SystemError::MissingSystem(system_id));
+        }
+
+        state.system_destroy_queue.extend(system_ids);
 
         Ok(())
     }
@@ -494,14 +532,14 @@ impl I131 {
         {
             let mut state = self.wait_until_end_of_frame()?;
 
-            let create_queue = state.system_create_queue.drain(..).collect::<Vec<_>>();
-            for (system_data, sys_id) in create_queue {
+            let create_queue = state.system_create_queue.drain().collect::<Vec<_>>();
+            for (sys_id, system_data) in create_queue {
                 state
                     .all_systems
                     .insert(sys_id, Arc::new(RwLock::new(system_data)));
             }
 
-            let destroy_queue = state.system_destroy_queue.drain(..).collect::<Vec<_>>();
+            let destroy_queue = state.system_destroy_queue.drain().collect::<Vec<_>>();
             for sys_id in destroy_queue {
                 {
                     let mut system_data = state
