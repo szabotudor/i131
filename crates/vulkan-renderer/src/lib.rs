@@ -12,6 +12,9 @@ pub enum VulkanRendererError {
     #[error("Error getting GLFW instance")]
     GLFWInstanceError,
 
+    #[error("Cannot enable validation layers because they are not supported")]
+    ValidationLayersNotSupported,
+
     #[error("Error loading vulkan library: {0}")]
     LoadingError(#[from] LoadingError),
 
@@ -31,6 +34,7 @@ impl VulkanRenderer {
         name: &str,
         app_version: (u32, u32, u32),
         window: &WindowDataGLFW,
+        enable_validation: bool,
     ) -> Result<Self, VulkanRendererError> {
         let app_info = ApplicationInfo {
             s_type: ApplicationInfo::STRUCTURE_TYPE,
@@ -51,28 +55,27 @@ impl VulkanRenderer {
             .map(|ext| ext.as_ptr())
             .collect::<Vec<_>>();
 
-        let create_info = InstanceCreateInfo {
-            s_type: InstanceCreateInfo::STRUCTURE_TYPE,
-            p_application_info: &app_info as *const ApplicationInfo,
-            enabled_extension_count: required_extensions.len() as u32,
-            pp_enabled_extension_names: required_extensions.as_ptr() as *const *const i8,
-            enabled_layer_count: 0,
-            ..Default::default()
-        };
-
         unsafe {
             let entry = Entry::linked();
 
-            panic!("Debug INFO");
-            let validation_layers = &["VK_LAYER_KRONOS_validation"];
+            let mut create_info = InstanceCreateInfo {
+                s_type: InstanceCreateInfo::STRUCTURE_TYPE,
+                p_application_info: &app_info as *const ApplicationInfo,
+                enabled_extension_count: required_extensions.len() as u32,
+                pp_enabled_extension_names: required_extensions.as_ptr() as *const *const i8,
+                enabled_layer_count: 0,
+                ..Default::default()
+            };
 
-            let properties = entry.enumerate_instance_layer_properties()?;
-
-            let validation_layer = properties.iter().find(|layer| {
-                let layer_name =
-                    str::from_utf8_unchecked(std::mem::transmute(&layer.layer_name as &[i8]));
-                validation_layers.contains(&layer_name)
-            });
+            // TODO: Very precarious
+            //
+            // Arrays might get dropped before `create_instance` reads them from the ptr
+            let validation_layers = ["VK_LAYER_KHRONOS_validation\0"];
+            let layer_names = &validation_layers.map(|layer| layer.as_ptr() as *const i8);
+            if enable_validation {
+                create_info.enabled_layer_count = validation_layers.len() as u32;
+                create_info.pp_enabled_layer_names = layer_names.as_ptr();
+            }
 
             let instance = entry.create_instance(&create_info, None)?;
 
@@ -87,8 +90,14 @@ impl VulkanRenderer {
         name: &str,
         app_version: (u32, u32, u32),
         window: &WindowDataGLFW,
+        enable_validation: bool,
     ) -> Result<Self, RendererError> {
-        Ok(Self::new_glfw_impl(name, app_version, window)?)
+        Ok(Self::new_glfw_impl(
+            name,
+            app_version,
+            window,
+            enable_validation,
+        )?)
     }
 }
 

@@ -31,8 +31,15 @@ impl Editor {
                 .with_size(Vec2u32::new(800, 600))
                 .with_mode(WindowMode::Windowed),
         )?;
-        let renderer =
-            VulkanRenderer::new_glfw("I131_VulkanBackend", (1, 3, 0), window.get_glfw_data())?;
+        // TODO: Implement system init arguments
+        //
+        // Needed to enable/disable validation here
+        let renderer = VulkanRenderer::new_glfw(
+            "I131_VulkanBackend",
+            (1, 3, 0),
+            window.get_glfw_data(),
+            true,
+        )?;
 
         Ok(Self {
             window,
