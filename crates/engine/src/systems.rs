@@ -517,7 +517,7 @@ impl I131 {
         let any_missing_system = system_ids
             .iter()
             .find(|id| {
-                !state.all_systems.contains_key(&id) || state.system_destroy_queue.contains(&id)
+                !state.all_systems.contains_key(id) || state.system_destroy_queue.contains(id)
             })
             .cloned();
         if let Some(system_id) = any_missing_system {
