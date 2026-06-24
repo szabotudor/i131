@@ -95,8 +95,6 @@ impl VulkanRenderer {
             .collect::<Vec<_>>();
 
         unsafe {
-            use std::mem::MaybeUninit;
-
             if enable_validation {
                 use ash::vk::EXT_DEBUG_UTILS_NAME;
 
@@ -116,21 +114,16 @@ impl VulkanRenderer {
             // TODO: Very precarious
             //
             // Arrays might get dropped before `create_instance` reads them from the ptr
-            let validation_layers = ["VK_LAYER_KHRONOS_validation\0"];
-            let layer_names = &validation_layers.map(|layer| layer.as_ptr() as *const i8);
+            let validation_layers = [c"VK_LAYER_KHRONOS_validation"];
+            let layer_names = &validation_layers.map(|layer| layer.as_ptr());
             if enable_validation {
                 create_info.enabled_layer_count = validation_layers.len() as u32;
                 create_info.pp_enabled_layer_names = layer_names.as_ptr();
             }
 
             let instance = entry.create_instance(&create_info, None)?;
-            let mut debug_messenger = None;
-            let mut debug_messenger_create_func =
-                MaybeUninit::<PFN_vkCreateDebugUtilsMessengerEXT>::uninit();
-            let mut debug_messenger_destroy_func =
-                MaybeUninit::<PFN_vkDestroyDebugUtilsMessengerEXT>::uninit();
 
-            if enable_validation {
+            let debug_messenger = if enable_validation {
                 use ash::vk::DebugUtilsMessengerCreateInfoEXT;
                 use std::ptr::null;
 
@@ -157,7 +150,6 @@ impl VulkanRenderer {
                     eprintln!("Error loading debug messenger create function");
                     return Err(VulkanRendererError::InvalidDebugMessenger);
                 };
-                debug_messenger_create_func = MaybeUninit::new(create_func);
 
                 let destroy_func_name = c"vkDestroyDebugUtilsMessengerEXT";
                 let Some(destroy_func) = entry
@@ -169,7 +161,6 @@ impl VulkanRenderer {
                     eprintln!("Error loading debug messenger destroy function");
                     return Err(VulkanRendererError::InvalidDebugMessenger);
                 };
-                debug_messenger_destroy_func = MaybeUninit::new(destroy_func);
 
                 let mut messenger = std::mem::MaybeUninit::<DebugUtilsMessengerEXT>::uninit();
 
@@ -183,20 +174,19 @@ impl VulkanRenderer {
                     return Err(VulkanRendererError::InvalidDebugMessenger);
                 }
 
-                // Should be init by the time we get here
-                //
-                // Uninit would have returned early in the else above
-                debug_messenger = Some(messenger.assume_init());
-            }
+                Some(DebugMessengerData {
+                    messenger: messenger.assume_init(),
+                    create_func,
+                    destroy_func,
+                })
+            } else {
+                None
+            };
 
             Ok(Self {
                 _entry: entry,
                 instance,
-                debug_messenger: debug_messenger.map(|messenger| DebugMessengerData {
-                    messenger,
-                    create_func: debug_messenger_create_func.assume_init(),
-                    destroy_func: debug_messenger_destroy_func.assume_init(),
-                }),
+                debug_messenger,
             })
         }
     }
