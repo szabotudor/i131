@@ -11,6 +11,7 @@ use renderer131::{Renderer, RendererError, RendererInstanceError};
 use std::{
     ffi::{CStr, c_void},
     ptr::null,
+    sync::{Arc, RwLock},
 };
 use thiserror::Error;
 use window131::WindowDataGLFW;
@@ -40,20 +41,38 @@ struct DebugMessengerData {
     #[expect(dead_code, reason = "Not used, but should keep track of nonetheless")]
     create_func: PFN_vkCreateDebugUtilsMessengerEXT,
     destroy_func: PFN_vkDestroyDebugUtilsMessengerEXT,
+    /// Only need to hold this copy for safety
+    /// Will keep Arc alive while it's still needed
+    /// Might use it in the renderer to interpret caught errors frmo the messenger
+    _caught_errors: Arc<RwLock<Vec<VulkanRendererError>>>,
+    p_user_data_ptr: *mut c_void,
 }
 pub struct VulkanRenderer {
     _entry: Entry,
     instance: Instance,
     debug_messenger: Option<DebugMessengerData>,
 }
+unsafe impl Send for VulkanRenderer {}
+unsafe impl Sync for VulkanRenderer {}
 
 impl VulkanRenderer {
     unsafe extern "system" fn debug_message_callback(
         _message_severity: DebugUtilsMessageSeverityFlagsEXT,
         _message_types: DebugUtilsMessageTypeFlagsEXT,
         p_callback_data: *const DebugUtilsMessengerCallbackDataEXT<'_>,
-        _p_user_data: *mut c_void,
+        p_user_data: *mut c_void,
     ) -> Bool32 {
+        let p_user_data = unsafe {
+            Box::<Arc<RwLock<Vec<VulkanRendererError>>>>::from_raw(p_user_data as *mut _)
+        };
+        let caught_errors = p_user_data.as_ref().clone();
+
+        #[expect(
+            unused_must_use,
+            reason = "p_user_data pointer still exists and will be sent to this function again"
+        )]
+        Box::into_raw(p_user_data);
+
         // TODO: Handle message severity, and maybe send error data to the renderer struct somehow
         //
         // Maybe shared Arc? Safe to send via raw pointer p_user_data?
@@ -129,6 +148,9 @@ impl VulkanRenderer {
 
                 let vk_instance = instance.handle();
 
+                let caught_errors = Arc::<RwLock<Vec<VulkanRendererError>>>::default();
+                let p_user_data = Box::into_raw(Box::new(caught_errors.clone())) as *mut c_void;
+
                 let debug_messanger_create_info = DebugUtilsMessengerCreateInfoEXT {
                     s_type: DebugUtilsMessengerCreateInfoEXT::STRUCTURE_TYPE,
                     message_severity: DebugUtilsMessageSeverityFlagsEXT::VERBOSE
@@ -138,7 +160,7 @@ impl VulkanRenderer {
                         | DebugUtilsMessageTypeFlagsEXT::VALIDATION
                         | DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
                     pfn_user_callback: Some(Self::debug_message_callback),
-                    p_user_data: null::<c_void>() as *mut c_void,
+                    p_user_data,
                     ..Default::default()
                 };
 
@@ -178,6 +200,8 @@ impl VulkanRenderer {
                     messenger: messenger.assume_init(),
                     create_func,
                     destroy_func,
+                    _caught_errors: caught_errors,
+                    p_user_data_ptr: p_user_data,
                 })
             } else {
                 None
@@ -210,8 +234,16 @@ impl Renderer for VulkanRenderer {}
 
 impl Drop for VulkanRenderer {
     fn drop(&mut self) {
-        if let Some(messenger) = &self.debug_messenger {
+        if let Some(messenger) = &mut self.debug_messenger {
             unsafe { (messenger.destroy_func)(self.instance.handle(), messenger.messenger, null()) }
+
+            // This should drop the pointer kept by the messenger as p_user_data
+            let _ = unsafe {
+                Box::from_raw(
+                    messenger.p_user_data_ptr as *mut Arc<RwLock<Vec<VulkanRendererError>>>,
+                )
+            };
+            messenger.p_user_data_ptr = null::<c_void>() as *mut c_void;
         }
         self.debug_messenger = None;
         unsafe { self.instance.destroy_instance(None) };
