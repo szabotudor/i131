@@ -41,6 +41,13 @@ pub enum VulkanRendererError {
 }
 impl RendererInstanceError for VulkanRendererError {}
 
+#[derive(Default, Clone, Copy, PartialEq)]
+pub enum ValidationLevel {
+    NoValidation,
+    #[default]
+    Normal,
+    Verbose,
+}
 #[derive(Default)]
 struct DebugMessengerUserData {
     errors: Vec<VulkanRendererError>,
@@ -127,6 +134,7 @@ impl VulkanRenderer {
     unsafe fn create_debug_messenger(
         entry: &Entry,
         instance: &Instance,
+        validation_level: ValidationLevel,
     ) -> Result<DebugMessengerData, VulkanRendererError> {
         use vk::DebugUtilsMessengerCreateInfoEXT;
         unsafe {
@@ -134,7 +142,10 @@ impl VulkanRenderer {
 
             let vk_instance = instance.handle();
 
-            let user_data = Arc::<RwLock<DebugMessengerUserData>>::default();
+            let user_data = Arc::new(RwLock::new(DebugMessengerUserData {
+                verbose: validation_level == ValidationLevel::Verbose,
+                ..Default::default()
+            }));
             let p_user_data = Box::into_raw(Box::new(user_data.clone())) as *mut c_void;
 
             let debug_messanger_create_info = DebugUtilsMessengerCreateInfoEXT {
@@ -283,7 +294,7 @@ impl VulkanRenderer {
         name: &str,
         app_version: (u32, u32, u32),
         window: &WindowDataGLFW,
-        enable_validation: bool,
+        enable_validation: ValidationLevel,
     ) -> Result<Self, VulkanRendererError> {
         let app_info = vk::ApplicationInfo {
             s_type: vk::ApplicationInfo::STRUCTURE_TYPE,
@@ -310,7 +321,7 @@ impl VulkanRenderer {
             .collect::<Vec<_>>();
 
         unsafe {
-            if enable_validation {
+            if enable_validation != ValidationLevel::NoValidation {
                 required_extensions.push(vk::EXT_DEBUG_UTILS_NAME.as_ptr() as *const u8);
             }
             let entry = Entry::linked();
@@ -329,15 +340,19 @@ impl VulkanRenderer {
             // Arrays might get dropped before `create_instance` reads them from the ptr
             let validation_layers = [c"VK_LAYER_KHRONOS_validation"];
             let layer_names = &validation_layers.map(|layer| layer.as_ptr());
-            if enable_validation {
+            if enable_validation != ValidationLevel::NoValidation {
                 create_info.enabled_layer_count = validation_layers.len() as u32;
                 create_info.pp_enabled_layer_names = layer_names.as_ptr();
             }
 
             let instance = entry.create_instance(&create_info, None)?;
 
-            let debug_messenger = if enable_validation {
-                Some(Self::create_debug_messenger(&entry, &instance)?)
+            let debug_messenger = if enable_validation != ValidationLevel::NoValidation {
+                Some(Self::create_debug_messenger(
+                    &entry,
+                    &instance,
+                    enable_validation,
+                )?)
             } else {
                 None
             };
@@ -356,7 +371,7 @@ impl VulkanRenderer {
         name: &str,
         app_version: (u32, u32, u32),
         window: &WindowDataGLFW,
-        enable_validation: bool,
+        enable_validation: ValidationLevel,
     ) -> Result<Self, RendererError> {
         Ok(Self::new_glfw_impl(
             name,

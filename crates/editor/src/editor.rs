@@ -5,7 +5,7 @@ use engine131::{
     window131::{Window, WindowError, WindowMode, WindowSettings},
 };
 use thiserror::Error;
-use vulkan_renderer::VulkanRenderer;
+use vulkan_renderer::{ValidationLevel, VulkanRenderer};
 
 #[derive(Error, Debug)]
 pub enum EditorError {
@@ -38,7 +38,7 @@ impl Editor {
             "I131_VulkanBackend",
             (1, 3, 0),
             window.get_glfw_data(),
-            true,
+            ValidationLevel::Normal,
         )?;
 
         Ok(Self {
