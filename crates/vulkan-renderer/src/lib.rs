@@ -203,6 +203,25 @@ impl VulkanRenderer {
         }
     }
 
+    unsafe fn find_queue_families(
+        instance: &Instance,
+        physical_device: vk::PhysicalDevice,
+    ) -> Result<QueueFamilies, VulkanRendererError> {
+        unsafe {
+            let queue_families =
+                instance.get_physical_device_queue_family_properties(physical_device);
+            let mut res = QueueFamilies::default();
+
+            for (index, queue_family) in queue_families.iter().enumerate() {
+                if (queue_family.queue_flags & vk::QueueFlags::GRAPHICS).as_raw() != 0 {
+                    res.graphics = Some(index as i32);
+                }
+            }
+
+            Ok(res)
+        }
+    }
+
     unsafe fn get_device_suitability_score(
         instance: &Instance,
         device: vk::PhysicalDevice,
@@ -237,25 +256,6 @@ impl VulkanRenderer {
             }
 
             Ok(score)
-        }
-    }
-
-    unsafe fn find_queue_families(
-        instance: &Instance,
-        physical_device: vk::PhysicalDevice,
-    ) -> Result<QueueFamilies, VulkanRendererError> {
-        unsafe {
-            let queue_families =
-                instance.get_physical_device_queue_family_properties(physical_device);
-            let mut res = QueueFamilies::default();
-
-            for (index, queue_family) in queue_families.iter().enumerate() {
-                if (queue_family.queue_flags & vk::QueueFlags::GRAPHICS).as_raw() != 0 {
-                    res.graphics = Some(index as i32);
-                }
-            }
-
-            Ok(res)
         }
     }
 
