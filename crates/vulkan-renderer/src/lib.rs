@@ -140,12 +140,74 @@ impl VulkanRenderer {
         }
     }
 
+    unsafe fn create_instance(
+        name: &str,
+        app_version: (u32, u32, u32),
+        mut required_extensions: Vec<*const u8>,
+        enable_validation: ValidationLevel,
+    ) -> Result<(Entry, Instance), VulkanRendererError> {
+        unsafe {
+            let app_info = vk::ApplicationInfo {
+                s_type: vk::ApplicationInfo::STRUCTURE_TYPE,
+                p_application_name: name as *const str as *const i8,
+                application_version: vk::make_api_version(
+                    0,
+                    app_version.0,
+                    app_version.1,
+                    app_version.2,
+                ),
+                p_engine_name: "I131" as *const str as *const i8,
+                engine_version: vk::make_api_version(
+                    0,
+                    app_version.0,
+                    app_version.1,
+                    app_version.2,
+                ),
+                api_version: vk::API_VERSION_1_3,
+                ..Default::default()
+            };
+
+            if enable_validation != ValidationLevel::NoValidation {
+                required_extensions.push(vk::EXT_DEBUG_UTILS_NAME.as_ptr() as *const u8);
+            }
+            let entry = Entry::linked();
+
+            let mut create_info = vk::InstanceCreateInfo {
+                s_type: vk::InstanceCreateInfo::STRUCTURE_TYPE,
+                p_application_info: &app_info as *const vk::ApplicationInfo,
+                enabled_extension_count: required_extensions.len() as u32,
+                pp_enabled_extension_names: required_extensions.as_ptr() as *const *const i8,
+                enabled_layer_count: 0,
+                ..Default::default()
+            };
+
+            // TODO: Very precarious
+            //
+            // Arrays might get dropped before `create_instance` reads them from the ptr
+            let validation_layers = [c"VK_LAYER_KHRONOS_validation"];
+            let layer_names = &validation_layers.map(|layer| layer.as_ptr());
+            if enable_validation != ValidationLevel::NoValidation {
+                create_info.enabled_layer_count = validation_layers.len() as u32;
+                create_info.pp_enabled_layer_names = layer_names.as_ptr();
+            }
+
+            let instance = entry.create_instance(&create_info, None)?;
+
+            Ok((entry, instance))
+        }
+    }
+
     unsafe fn create_debug_messenger(
         entry: &Entry,
         instance: &Instance,
         validation_level: ValidationLevel,
-    ) -> Result<DebugMessengerData, VulkanRendererError> {
+    ) -> Result<Option<DebugMessengerData>, VulkanRendererError> {
         use vk::DebugUtilsMessengerCreateInfoEXT;
+
+        if validation_level == ValidationLevel::NoValidation {
+            return Ok(None);
+        }
+
         unsafe {
             use std::ptr::null;
 
@@ -202,13 +264,13 @@ impl VulkanRenderer {
                 return Err(VulkanRendererError::InvalidDebugMessenger);
             }
 
-            Ok(DebugMessengerData {
+            Ok(Some(DebugMessengerData {
                 messenger: messenger.assume_init(),
                 create_func,
                 destroy_func,
                 _user_data: user_data,
                 p_user_data_ptr: p_user_data,
-            })
+            }))
         }
     }
 
@@ -270,7 +332,7 @@ impl VulkanRenderer {
 
     unsafe fn create_device(
         instance: &Instance,
-    ) -> Result<(Device, QueueFamilies), VulkanRendererError> {
+    ) -> Result<(Device, DeviceQueues), VulkanRendererError> {
         unsafe {
             let device = instance
                 .enumerate_physical_devices()?
@@ -315,7 +377,13 @@ impl VulkanRenderer {
 
                 let device = instance.create_device(physical_device, &create_info, None)?;
 
-                Ok((device, queue_families))
+                let device_queues = DeviceQueues {
+                    graphics: queue_families
+                        .graphics
+                        .map(|idx| device.get_device_queue(idx, 0)),
+                };
+
+                Ok((device, device_queues))
             } else {
                 Err(VulkanRendererError::NoSupportedDevices)
             }
@@ -329,73 +397,23 @@ impl VulkanRenderer {
         window: &WindowDataGLFW,
         enable_validation: ValidationLevel,
     ) -> Result<Self, VulkanRendererError> {
-        let app_info = vk::ApplicationInfo {
-            s_type: vk::ApplicationInfo::STRUCTURE_TYPE,
-            p_application_name: name as *const str as *const i8,
-            application_version: vk::make_api_version(
-                0,
-                app_version.0,
-                app_version.1,
-                app_version.2,
-            ),
-            p_engine_name: "I131" as *const str as *const i8,
-            engine_version: vk::make_api_version(0, app_version.0, app_version.1, app_version.2),
-            api_version: vk::API_VERSION_1_3,
-            ..Default::default()
-        };
-
-        let required_extensions = window
-            .glfw
-            .get_required_instance_extensions()
-            .ok_or_else(|| VulkanRendererError::GLFWInstanceError)?;
-        let mut required_extensions = required_extensions
-            .iter()
-            .map(|ext| ext.as_ptr())
-            .collect::<Vec<_>>();
-
         unsafe {
-            if enable_validation != ValidationLevel::NoValidation {
-                required_extensions.push(vk::EXT_DEBUG_UTILS_NAME.as_ptr() as *const u8);
-            }
-            let entry = Entry::linked();
+            let required_extensions = window
+                .glfw
+                .get_required_instance_extensions()
+                .ok_or_else(|| VulkanRendererError::GLFWInstanceError)?;
+            let required_extensions = required_extensions
+                .iter()
+                .map(|ext| ext.as_ptr())
+                .collect::<Vec<_>>();
 
-            let mut create_info = vk::InstanceCreateInfo {
-                s_type: vk::InstanceCreateInfo::STRUCTURE_TYPE,
-                p_application_info: &app_info as *const vk::ApplicationInfo,
-                enabled_extension_count: required_extensions.len() as u32,
-                pp_enabled_extension_names: required_extensions.as_ptr() as *const *const i8,
-                enabled_layer_count: 0,
-                ..Default::default()
-            };
+            let (entry, instance) =
+                Self::create_instance(name, app_version, required_extensions, enable_validation)?;
 
-            // TODO: Very precarious
-            //
-            // Arrays might get dropped before `create_instance` reads them from the ptr
-            let validation_layers = [c"VK_LAYER_KHRONOS_validation"];
-            let layer_names = &validation_layers.map(|layer| layer.as_ptr());
-            if enable_validation != ValidationLevel::NoValidation {
-                create_info.enabled_layer_count = validation_layers.len() as u32;
-                create_info.pp_enabled_layer_names = layer_names.as_ptr();
-            }
+            let debug_messenger =
+                Self::create_debug_messenger(&entry, &instance, enable_validation)?;
 
-            let instance = entry.create_instance(&create_info, None)?;
-
-            let debug_messenger = if enable_validation != ValidationLevel::NoValidation {
-                Some(Self::create_debug_messenger(
-                    &entry,
-                    &instance,
-                    enable_validation,
-                )?)
-            } else {
-                None
-            };
-
-            let (device, queue_families) = Self::create_device(&instance)?;
-            let device_queues = DeviceQueues {
-                graphics: queue_families
-                    .graphics
-                    .map(|idx| device.get_device_queue(idx, 0)),
-            };
+            let (device, device_queues) = Self::create_device(&instance)?;
 
             Ok(Self {
                 _entry: entry,
