@@ -1,4 +1,5 @@
 use ash::{
+    Device,
     Entry,
     Instance,
     LoadingError,
@@ -26,6 +27,9 @@ pub enum VulkanRendererError {
 
     #[error("Failed to create debug messenger")]
     InvalidDebugMessenger,
+
+    #[error("Chosen devise is missing required queue family support for \"{0}\"")]
+    MissingQueue(String),
 
     #[error("There are no physical devices that support vulkan")]
     NoSupportedDevices,
@@ -64,13 +68,18 @@ struct DebugMessengerData {
     _user_data: Arc<RwLock<DebugMessengerUserData>>,
     p_user_data_ptr: *mut c_void,
 }
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct QueueFamilies {
-    graphics: Option<i32>,
+    graphics: Option<u32>,
+}
+struct DeviceQueues {
+    graphics: Option<vk::Queue>,
 }
 pub struct VulkanRenderer {
     _entry: Entry,
     instance: Instance,
+    device: Device,
+    device_queues: DeviceQueues,
     debug_messenger: Option<DebugMessengerData>,
 }
 unsafe impl Send for VulkanRenderer {}
@@ -214,7 +223,7 @@ impl VulkanRenderer {
 
             for (index, queue_family) in queue_families.iter().enumerate() {
                 if (queue_family.queue_flags & vk::QueueFlags::GRAPHICS).as_raw() != 0 {
-                    res.graphics = Some(index as i32);
+                    res.graphics = Some(index as u32);
                 }
             }
 
@@ -224,12 +233,12 @@ impl VulkanRenderer {
 
     unsafe fn get_device_suitability_score(
         instance: &Instance,
-        device: vk::PhysicalDevice,
-    ) -> Result<i32, VulkanRendererError> {
+        physical_device: vk::PhysicalDevice,
+    ) -> Result<(i32, QueueFamilies), VulkanRendererError> {
         unsafe {
-            let device_properties = instance.get_physical_device_properties(device);
+            let device_properties = instance.get_physical_device_properties(physical_device);
             #[expect(unused_variables, reason = "No feature checks yet")]
-            let device_features = instance.get_physical_device_features(device);
+            let device_features = instance.get_physical_device_features(physical_device);
 
             let score = if (device_properties.device_type.as_raw()
                 & vk::PhysicalDeviceType::VIRTUAL_GPU.as_raw())
@@ -247,19 +256,21 @@ impl VulkanRenderer {
             {
                 3
             } else {
-                return Ok(0);
+                return Ok((0, QueueFamilies::default()));
             };
 
-            let queue_families = Self::find_queue_families(instance, device)?;
+            let queue_families = Self::find_queue_families(instance, physical_device)?;
             if queue_families.graphics.is_none() {
-                return Ok(0);
+                return Ok((0, QueueFamilies::default()));
             }
 
-            Ok(score)
+            Ok((score, queue_families))
         }
     }
 
-    unsafe fn create_physical_device(instance: &Instance) -> Result<(), VulkanRendererError> {
+    unsafe fn create_device(
+        instance: &Instance,
+    ) -> Result<(Device, QueueFamilies), VulkanRendererError> {
         unsafe {
             let device = instance
                 .enumerate_physical_devices()?
@@ -272,20 +283,42 @@ impl VulkanRenderer {
                 })
                 .collect::<Result<Vec<_>, VulkanRendererError>>()?
                 .into_iter()
-                .filter(|(suitability, _)| *suitability > 0)
-                .fold((0i32, None), |acc, device| {
-                    if device.0 > acc.0 {
+                .filter(|(suitability, _)| suitability.0 > 0)
+                .fold(((0i32, QueueFamilies::default()), None), |acc, device| {
+                    if device.0.0 > acc.0.0 {
                         (device.0, Some(device.1))
                     } else {
                         acc
                     }
                 });
-            if let Some(device) = device.1 {
-            } else {
-                return Err(VulkanRendererError::NoSupportedDevices);
-            }
+            if let Some(physical_device) = device.1 {
+                let queue_families = device.0.1;
+                let queue_priority = 1.0f32;
 
-            Ok(())
+                let queue_create_info = vk::DeviceQueueCreateInfo {
+                    s_type: vk::DeviceQueueCreateInfo::STRUCTURE_TYPE,
+                    queue_family_index: queue_families
+                        .graphics
+                        .ok_or_else(|| VulkanRendererError::MissingQueue("GRAPHICS".to_string()))?,
+                    queue_count: 1,
+                    p_queue_priorities: &queue_priority as *const f32,
+                    ..Default::default()
+                };
+
+                let create_info = vk::DeviceCreateInfo {
+                    s_type: vk::DeviceCreateInfo::STRUCTURE_TYPE,
+                    p_queue_create_infos: &queue_create_info as *const vk::DeviceQueueCreateInfo,
+                    queue_create_info_count: 1,
+                    p_enabled_features: null(),
+                    ..Default::default()
+                };
+
+                let device = instance.create_device(physical_device, &create_info, None)?;
+
+                Ok((device, queue_families))
+            } else {
+                Err(VulkanRendererError::NoSupportedDevices)
+            }
         }
     }
 
@@ -357,11 +390,18 @@ impl VulkanRenderer {
                 None
             };
 
-            Self::create_physical_device(&instance)?;
+            let (device, queue_families) = Self::create_device(&instance)?;
+            let device_queues = DeviceQueues {
+                graphics: queue_families
+                    .graphics
+                    .map(|idx| device.get_device_queue(idx, 0)),
+            };
 
             Ok(Self {
                 _entry: entry,
                 instance,
+                device,
+                device_queues,
                 debug_messenger,
             })
         }
@@ -398,6 +438,8 @@ impl Drop for VulkanRenderer {
             messenger.p_user_data_ptr = null::<c_void>() as *mut c_void;
         }
         self.debug_messenger = None;
+
+        unsafe { self.device.destroy_device(None) };
         unsafe { self.instance.destroy_instance(None) };
     }
 }
