@@ -7,6 +7,10 @@ use ash::{
     // Everything in `vk::` should use explicit paths to be descriptive
     vk::{self, TaggedStructure},
 };
+#[cfg(feature = "GLFW")]
+use raw_window_handle::HandleError;
+#[cfg(target_os = "linux")]
+use raw_window_handle::{WaylandDisplayHandle, WaylandWindowHandle};
 use renderer131::{Renderer, RendererError, RendererInstanceError};
 use std::{
     ffi::{CStr, c_void},
@@ -22,11 +26,25 @@ pub enum VulkanRendererError {
     #[error("Error getting GLFW instance")]
     GLFWInstanceError,
 
+    #[cfg(feature = "GLFW")]
+    #[error("Unknown GLFW error: {0}")]
+    UnknownGLFWError(String),
+
+    #[cfg(feature = "GLFW")]
+    #[error("Error getting raw window handle for vkSurfaceKHR creation: {0}")]
+    HandleError(HandleError),
+
     #[error("Cannot enable validation layers because they are not supported")]
     ValidationLayersNotSupported,
 
     #[error("Failed to create debug messenger")]
     InvalidDebugMessenger,
+
+    #[error("Failed to create {0} vulkan surface")]
+    SurfaceCreateFailure(String),
+
+    #[error("Missing required vulkan extension \"{0}\"")]
+    MissingExtention(String),
 
     #[error("Chosen devise is missing required queue family support for \"{0}\"")]
     MissingQueue(String),
@@ -42,6 +60,11 @@ pub enum VulkanRendererError {
 
     #[error("Vulkan Error: {0}")]
     VulkanError(String),
+}
+impl From<HandleError> for VulkanRendererError {
+    fn from(value: HandleError) -> Self {
+        Self::HandleError(value)
+    }
 }
 impl RendererInstanceError for VulkanRendererError {}
 
@@ -59,9 +82,6 @@ struct DebugMessengerUserData {
 }
 struct DebugMessengerData {
     messenger: vk::DebugUtilsMessengerEXT,
-    #[expect(dead_code, reason = "Not used, but should keep track of nonetheless")]
-    create_func: vk::PFN_vkCreateDebugUtilsMessengerEXT,
-    destroy_func: vk::PFN_vkDestroyDebugUtilsMessengerEXT,
     /// Only need to hold this copy for safety
     /// Will keep Arc alive while it's still needed
     /// Might use it in the renderer to interpret caught errors frmo the messenger
@@ -75,11 +95,19 @@ struct QueueFamilies {
 struct DeviceQueues {
     graphics: Option<vk::Queue>,
 }
+struct InstanceExtensions {
+    create_debug_utils_messenger_ext: vk::PFN_vkCreateDebugUtilsMessengerEXT,
+    destroy_debug_utils_messenger_ext: vk::PFN_vkDestroyDebugUtilsMessengerEXT,
+    #[cfg(target_os = "linux")]
+    create_wayland_surface_khr: vk::PFN_vkCreateWaylandSurfaceKHR,
+}
 pub struct VulkanRenderer {
     _entry: Entry,
     instance: Instance,
+    instance_extensions: InstanceExtensions,
     device: Device,
     device_queues: DeviceQueues,
+    surface: vk::SurfaceKHR,
     debug_messenger: Option<DebugMessengerData>,
 }
 unsafe impl Send for VulkanRenderer {}
@@ -200,6 +228,7 @@ impl VulkanRenderer {
     unsafe fn create_debug_messenger(
         entry: &Entry,
         instance: &Instance,
+        instance_extensions: &InstanceExtensions,
         validation_level: ValidationLevel,
     ) -> Result<Option<DebugMessengerData>, VulkanRendererError> {
         use vk::DebugUtilsMessengerCreateInfoEXT;
@@ -232,29 +261,9 @@ impl VulkanRenderer {
                 ..Default::default()
             };
 
-            let create_func_name = c"vkCreateDebugUtilsMessengerEXT";
-            let Some(create_func) = entry
-                .get_instance_proc_addr(vk_instance, create_func_name.as_ptr())
-                .map(|func| std::mem::transmute::<_, vk::PFN_vkCreateDebugUtilsMessengerEXT>(func))
-            else {
-                eprintln!("Error loading debug messenger create function");
-                return Err(VulkanRendererError::InvalidDebugMessenger);
-            };
-
-            let destroy_func_name = c"vkDestroyDebugUtilsMessengerEXT";
-            let Some(destroy_func) = entry
-                .get_instance_proc_addr(vk_instance, destroy_func_name.as_ptr())
-                .map(|func| {
-                    std::mem::transmute::<_, vk::PFN_vkDestroyDebugUtilsMessengerEXT>(func)
-                })
-            else {
-                eprintln!("Error loading debug messenger destroy function");
-                return Err(VulkanRendererError::InvalidDebugMessenger);
-            };
-
             let mut messenger = std::mem::MaybeUninit::<vk::DebugUtilsMessengerEXT>::uninit();
 
-            let res = (create_func)(
+            let res = (instance_extensions.create_debug_utils_messenger_ext)(
                 vk_instance,
                 &debug_messanger_create_info as *const DebugUtilsMessengerCreateInfoEXT,
                 null(),
@@ -266,8 +275,6 @@ impl VulkanRenderer {
 
             Ok(Some(DebugMessengerData {
                 messenger: messenger.assume_init(),
-                create_func,
-                destroy_func,
                 _user_data: user_data,
                 p_user_data_ptr: p_user_data,
             }))
@@ -390,6 +397,134 @@ impl VulkanRenderer {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    unsafe fn create_surface_wayland(
+        instance: &Instance,
+        instance_extensions: &InstanceExtensions,
+        window: WaylandWindowHandle,
+        display: WaylandDisplayHandle,
+    ) -> Result<vk::SurfaceKHR, VulkanRendererError> {
+        unsafe {
+            let create_info = vk::WaylandSurfaceCreateInfoKHR {
+                s_type: vk::WaylandSurfaceCreateInfoKHR::STRUCTURE_TYPE,
+                surface: window.surface.as_ptr(),
+                display: display.display.as_ptr(),
+                ..Default::default()
+            };
+
+            let mut surface = std::mem::MaybeUninit::<vk::SurfaceKHR>::uninit();
+
+            let res = (instance_extensions.create_wayland_surface_khr)(
+                instance.handle(),
+                &create_info as *const _,
+                null(),
+                surface.as_mut_ptr(),
+            );
+            if res.result().is_err() {
+                return Err(VulkanRendererError::SurfaceCreateFailure(
+                    "Wayland".to_string(),
+                ));
+            }
+
+            todo!()
+        }
+    }
+
+    #[cfg(feature = "GLFW")]
+    unsafe fn create_surface_glfw(
+        instance: &Instance,
+        instance_extensions: &InstanceExtensions,
+        window: &WindowDataGLFW,
+    ) -> Result<vk::SurfaceKHR, VulkanRendererError> {
+        unsafe {
+            use raw_window_handle::{
+                HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
+            };
+
+            let handle = window.window.window_handle()?;
+            let display_handle = window.window.display_handle()?;
+            match (handle.as_raw(), display_handle.as_raw()) {
+                #[cfg(target_os = "linux")]
+                (
+                    RawWindowHandle::Wayland(wayland_window_handle),
+                    RawDisplayHandle::Wayland(wayland_display_handle),
+                ) => Self::create_surface_wayland(
+                    instance,
+                    instance_extensions,
+                    wayland_window_handle,
+                    wayland_display_handle,
+                ),
+                #[cfg(target_os = "linux")]
+                (
+                    RawWindowHandle::Xlib(_xlib_window_handle),
+                    RawDisplayHandle::Xlib(_xlib_display_handle),
+                ) => {
+                    todo!("Implement X11 surface creation for vulkan")
+                }
+                #[cfg(target_os = "windows")]
+                RawWindowHandle::Win32(_win32_window_handle) => {
+                    todo!("Implement Win32 surface creation for vulkan")
+                }
+
+                other => {
+                    return Err(VulkanRendererError::UnknownGLFWError(format!(
+                        "Vulkan surface creation not implemented for: {other:?}"
+                    )));
+                }
+            }
+        }
+    }
+
+    unsafe fn load_instance_proc_addr<T: Sized>(
+        entry: &Entry,
+        instance: vk::Instance,
+        name: &CStr,
+    ) -> Result<T, VulkanRendererError> {
+        unsafe {
+            let Some(proc_addr) = entry
+                .get_instance_proc_addr(instance, name.as_ptr())
+                .map(|f| std::mem::transmute_copy(&f))
+            else {
+                return Err(VulkanRendererError::MissingExtention(
+                    "vkCreateWaylandSurfaceKHR".to_string(),
+                ));
+            };
+
+            Ok(proc_addr)
+        }
+    }
+    unsafe fn load_instance_extensions(
+        entry: &Entry,
+        instance: vk::Instance,
+    ) -> Result<InstanceExtensions, VulkanRendererError> {
+        unsafe {
+            let create_debug_utils_messenger_ext =
+                Self::load_instance_proc_addr::<vk::PFN_vkCreateDebugUtilsMessengerEXT>(
+                    entry,
+                    instance,
+                    c"vkCreateDebugUtilsMessengerEXT",
+                )?;
+            let destroy_debug_utils_messenger_ext =
+                Self::load_instance_proc_addr::<vk::PFN_vkDestroyDebugUtilsMessengerEXT>(
+                    entry,
+                    instance,
+                    c"vkDestroyDebugUtilsMessengerEXT",
+                )?;
+
+            let create_wayland_surface_khr = Self::load_instance_proc_addr::<
+                vk::PFN_vkCreateWaylandSurfaceKHR,
+            >(
+                entry, instance, c"vkCreateWaylandSurfaceKHR"
+            )?;
+
+            Ok(InstanceExtensions {
+                create_debug_utils_messenger_ext,
+                destroy_debug_utils_messenger_ext,
+                create_wayland_surface_khr,
+            })
+        }
+    }
+
     #[cfg(feature = "GLFW")]
     pub fn new_glfw_impl(
         name: &str,
@@ -410,16 +545,26 @@ impl VulkanRenderer {
             let (entry, instance) =
                 Self::create_instance(name, app_version, required_extensions, enable_validation)?;
 
-            let debug_messenger =
-                Self::create_debug_messenger(&entry, &instance, enable_validation)?;
+            let instance_extensions = Self::load_instance_extensions(&entry, instance.handle())?;
+
+            let debug_messenger = Self::create_debug_messenger(
+                &entry,
+                &instance,
+                &instance_extensions,
+                enable_validation,
+            )?;
 
             let (device, device_queues) = Self::create_device(&instance)?;
+
+            let surface = Self::create_surface_glfw(&instance, &instance_extensions, window)?;
 
             Ok(Self {
                 _entry: entry,
                 instance,
+                instance_extensions,
                 device,
                 device_queues,
+                surface,
                 debug_messenger,
             })
         }
@@ -445,7 +590,13 @@ impl Renderer for VulkanRenderer {}
 impl Drop for VulkanRenderer {
     fn drop(&mut self) {
         if let Some(messenger) = &mut self.debug_messenger {
-            unsafe { (messenger.destroy_func)(self.instance.handle(), messenger.messenger, null()) }
+            unsafe {
+                (self.instance_extensions.destroy_debug_utils_messenger_ext)(
+                    self.instance.handle(),
+                    messenger.messenger,
+                    null(),
+                )
+            }
 
             // This should drop the pointer kept by the messenger as p_user_data
             let _ = unsafe {

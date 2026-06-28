@@ -10,6 +10,8 @@ window131.workspace = true
 ash.workspace = true
 thiserror.workspace = true
 
+raw-window-handle = { version = "0.6.2", optional = true }
+
 [features]
-GLFW = []
+GLFW = [ "raw-window-handle" ]
 
