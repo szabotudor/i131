@@ -100,6 +100,7 @@ struct InstanceExtensions {
     destroy_debug_utils_messenger_ext: vk::PFN_vkDestroyDebugUtilsMessengerEXT,
     #[cfg(target_os = "linux")]
     create_wayland_surface_khr: vk::PFN_vkCreateWaylandSurfaceKHR,
+    destroy_surface_khr: vk::PFN_vkDestroySurfaceKHR,
 }
 pub struct VulkanRenderer {
     _entry: Entry,
@@ -426,7 +427,7 @@ impl VulkanRenderer {
                 ));
             }
 
-            todo!()
+            Ok(surface.assume_init())
         }
     }
 
@@ -517,10 +518,17 @@ impl VulkanRenderer {
                 entry, instance, c"vkCreateWaylandSurfaceKHR"
             )?;
 
+            let destroy_surface_khr = Self::load_instance_proc_addr::<vk::PFN_vkDestroySurfaceKHR>(
+                entry,
+                instance,
+                c"vkDestroySurfaceKHR",
+            )?;
+
             Ok(InstanceExtensions {
                 create_debug_utils_messenger_ext,
                 destroy_debug_utils_messenger_ext,
                 create_wayland_surface_khr,
+                destroy_surface_khr,
             })
         }
     }
@@ -608,7 +616,14 @@ impl Drop for VulkanRenderer {
         }
         self.debug_messenger = None;
 
-        unsafe { self.device.destroy_device(None) };
-        unsafe { self.instance.destroy_instance(None) };
+        unsafe {
+            self.device.destroy_device(None);
+            (self.instance_extensions.destroy_surface_khr)(
+                self.instance.handle(),
+                self.surface,
+                null(),
+            );
+            self.instance.destroy_instance(None);
+        }
     }
 }
