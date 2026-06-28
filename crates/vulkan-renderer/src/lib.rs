@@ -227,7 +227,6 @@ impl VulkanRenderer {
     }
 
     unsafe fn create_debug_messenger(
-        entry: &Entry,
         instance: &Instance,
         instance_extensions: &InstanceExtensions,
         validation_level: ValidationLevel,
@@ -467,11 +466,9 @@ impl VulkanRenderer {
                     todo!("Implement Win32 surface creation for vulkan")
                 }
 
-                other => {
-                    return Err(VulkanRendererError::UnknownGLFWError(format!(
-                        "Vulkan surface creation not implemented for: {other:?}"
-                    )));
-                }
+                other => Err(VulkanRendererError::UnknownGLFWError(format!(
+                    "Vulkan surface creation not implemented for: {other:?}"
+                ))),
             }
         }
     }
@@ -555,12 +552,8 @@ impl VulkanRenderer {
 
             let instance_extensions = Self::load_instance_extensions(&entry, instance.handle())?;
 
-            let debug_messenger = Self::create_debug_messenger(
-                &entry,
-                &instance,
-                &instance_extensions,
-                enable_validation,
-            )?;
+            let debug_messenger =
+                Self::create_debug_messenger(&instance, &instance_extensions, enable_validation)?;
 
             let (device, device_queues) = Self::create_device(&instance)?;
 
