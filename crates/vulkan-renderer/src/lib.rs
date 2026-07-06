@@ -56,7 +56,7 @@ pub enum VulkanRendererError {
     LoadingError(#[from] LoadingError),
 
     #[error("Vulkan API error: {0}")]
-    VulkanAPIError(#[from] ash::vk::Result),
+    VulkanAPIError(#[from] vk::Result),
 
     #[error("Vulkan Error: {0}")]
     VulkanError(String),
@@ -91,9 +91,11 @@ struct DebugMessengerData {
 #[derive(Default, Debug)]
 struct QueueFamilies {
     graphics: Option<u32>,
+    present: Option<u32>,
 }
 struct DeviceQueues {
     graphics: Option<vk::Queue>,
+    present: Option<vk::Queue>,
 }
 struct InstanceExtensions {
     create_debug_utils_messenger_ext: vk::PFN_vkCreateDebugUtilsMessengerEXT,
@@ -101,6 +103,7 @@ struct InstanceExtensions {
     #[cfg(target_os = "linux")]
     create_wayland_surface_khr: vk::PFN_vkCreateWaylandSurfaceKHR,
     destroy_surface_khr: vk::PFN_vkDestroySurfaceKHR,
+    get_physical_device_surface_support_khr: vk::PFN_vkGetPhysicalDeviceSurfaceSupportKHR,
 }
 pub struct VulkanRenderer {
     _entry: Entry,
@@ -166,6 +169,71 @@ impl VulkanRenderer {
                 _ => {}
             }
             true.into()
+        }
+    }
+
+    unsafe fn load_instance_proc_addr<T: Sized>(
+        entry: &Entry,
+        instance: vk::Instance,
+        name: &CStr,
+    ) -> Result<T, VulkanRendererError> {
+        unsafe {
+            let Some(proc_addr) = entry
+                .get_instance_proc_addr(instance, name.as_ptr())
+                .map(|f| std::mem::transmute_copy(&f))
+            else {
+                return Err(VulkanRendererError::MissingExtention(
+                    "vkCreateWaylandSurfaceKHR".to_string(),
+                ));
+            };
+
+            Ok(proc_addr)
+        }
+    }
+    unsafe fn load_instance_extensions(
+        entry: &Entry,
+        instance: vk::Instance,
+    ) -> Result<InstanceExtensions, VulkanRendererError> {
+        unsafe {
+            let create_debug_utils_messenger_ext =
+                Self::load_instance_proc_addr::<vk::PFN_vkCreateDebugUtilsMessengerEXT>(
+                    entry,
+                    instance,
+                    c"vkCreateDebugUtilsMessengerEXT",
+                )?;
+            let destroy_debug_utils_messenger_ext =
+                Self::load_instance_proc_addr::<vk::PFN_vkDestroyDebugUtilsMessengerEXT>(
+                    entry,
+                    instance,
+                    c"vkDestroyDebugUtilsMessengerEXT",
+                )?;
+
+            let create_wayland_surface_khr = Self::load_instance_proc_addr::<
+                vk::PFN_vkCreateWaylandSurfaceKHR,
+            >(
+                entry, instance, c"vkCreateWaylandSurfaceKHR"
+            )?;
+
+            let destroy_surface_khr = Self::load_instance_proc_addr::<vk::PFN_vkDestroySurfaceKHR>(
+                entry,
+                instance,
+                c"vkDestroySurfaceKHR",
+            )?;
+
+            let get_physical_device_surface_support_khr =
+                Self::load_instance_proc_addr::<vk::PFN_vkGetPhysicalDeviceSurfaceSupportKHR>(
+                    entry,
+                    instance,
+                    c"vkGetPhysicalDeviceSurfaceSupportKHR",
+                )?;
+
+            Ok(InstanceExtensions {
+                create_debug_utils_messenger_ext,
+                destroy_debug_utils_messenger_ext,
+                create_wayland_surface_khr,
+                destroy_surface_khr,
+                get_physical_device_surface_support_khr,
+            })
         }
     }
 
@@ -283,7 +351,9 @@ impl VulkanRenderer {
 
     unsafe fn find_queue_families(
         instance: &Instance,
+        instance_extensions: &InstanceExtensions,
         physical_device: vk::PhysicalDevice,
+        surface: vk::SurfaceKHR,
     ) -> Result<QueueFamilies, VulkanRendererError> {
         unsafe {
             let queue_families =
@@ -294,6 +364,19 @@ impl VulkanRenderer {
                 if (queue_family.queue_flags & vk::QueueFlags::GRAPHICS).as_raw() != 0 {
                     res.graphics = Some(index as u32);
                 }
+
+                let mut present_support = vk::FALSE;
+                (instance_extensions.get_physical_device_surface_support_khr)(
+                    physical_device,
+                    index as u32,
+                    surface,
+                    &mut present_support as *mut vk::Bool32,
+                )
+                .result()?;
+
+                if present_support != 0 {
+                    res.present = Some(index as u32);
+                }
             }
 
             Ok(res)
@@ -302,7 +385,9 @@ impl VulkanRenderer {
 
     unsafe fn get_device_suitability_score(
         instance: &Instance,
+        instance_extensions: &InstanceExtensions,
         physical_device: vk::PhysicalDevice,
+        surface: vk::SurfaceKHR,
     ) -> Result<(i32, QueueFamilies), VulkanRendererError> {
         unsafe {
             let device_properties = instance.get_physical_device_properties(physical_device);
@@ -328,7 +413,8 @@ impl VulkanRenderer {
                 return Ok((0, QueueFamilies::default()));
             };
 
-            let queue_families = Self::find_queue_families(instance, physical_device)?;
+            let queue_families =
+                Self::find_queue_families(instance, instance_extensions, physical_device, surface)?;
             if queue_families.graphics.is_none() {
                 return Ok((0, QueueFamilies::default()));
             }
@@ -339,6 +425,8 @@ impl VulkanRenderer {
 
     unsafe fn create_device(
         instance: &Instance,
+        instance_extensions: &InstanceExtensions,
+        surface: vk::SurfaceKHR,
     ) -> Result<(Device, DeviceQueues), VulkanRendererError> {
         unsafe {
             let device = instance
@@ -346,7 +434,12 @@ impl VulkanRenderer {
                 .into_iter()
                 .map(|device| {
                     Ok((
-                        Self::get_device_suitability_score(instance, device)?,
+                        Self::get_device_suitability_score(
+                            instance,
+                            instance_extensions,
+                            device,
+                            surface,
+                        )?,
                         device,
                     ))
                 })
@@ -364,20 +457,31 @@ impl VulkanRenderer {
                 let queue_families = device.0.1;
                 let queue_priority = 1.0f32;
 
-                let queue_create_info = vk::DeviceQueueCreateInfo {
-                    s_type: vk::DeviceQueueCreateInfo::STRUCTURE_TYPE,
-                    queue_family_index: queue_families
-                        .graphics
-                        .ok_or_else(|| VulkanRendererError::MissingQueue("GRAPHICS".to_string()))?,
-                    queue_count: 1,
-                    p_queue_priorities: &queue_priority as *const f32,
-                    ..Default::default()
-                };
+                let queue_create_infos = [
+                    vk::DeviceQueueCreateInfo {
+                        s_type: vk::DeviceQueueCreateInfo::STRUCTURE_TYPE,
+                        queue_family_index: queue_families.graphics.ok_or_else(|| {
+                            VulkanRendererError::MissingQueue("GRAPHICS".to_string())
+                        })?,
+                        queue_count: 1,
+                        p_queue_priorities: &queue_priority as *const f32,
+                        ..Default::default()
+                    },
+                    vk::DeviceQueueCreateInfo {
+                        s_type: vk::DeviceQueueCreateInfo::STRUCTURE_TYPE,
+                        queue_family_index: queue_families.present.ok_or_else(|| {
+                            VulkanRendererError::MissingQueue("PRESENT".to_string())
+                        })?,
+                        queue_count: 1,
+                        p_queue_priorities: &queue_priority as *const f32,
+                        ..Default::default()
+                    },
+                ];
 
                 let create_info = vk::DeviceCreateInfo {
                     s_type: vk::DeviceCreateInfo::STRUCTURE_TYPE,
-                    p_queue_create_infos: &queue_create_info as *const vk::DeviceQueueCreateInfo,
-                    queue_create_info_count: 1,
+                    p_queue_create_infos: queue_create_infos.as_ptr(),
+                    queue_create_info_count: queue_create_infos.len() as u32,
                     p_enabled_features: null(),
                     ..Default::default()
                 };
@@ -387,6 +491,9 @@ impl VulkanRenderer {
                 let device_queues = DeviceQueues {
                     graphics: queue_families
                         .graphics
+                        .map(|idx| device.get_device_queue(idx, 0)),
+                    present: queue_families
+                        .present
                         .map(|idx| device.get_device_queue(idx, 0)),
                 };
 
@@ -473,63 +580,6 @@ impl VulkanRenderer {
         }
     }
 
-    unsafe fn load_instance_proc_addr<T: Sized>(
-        entry: &Entry,
-        instance: vk::Instance,
-        name: &CStr,
-    ) -> Result<T, VulkanRendererError> {
-        unsafe {
-            let Some(proc_addr) = entry
-                .get_instance_proc_addr(instance, name.as_ptr())
-                .map(|f| std::mem::transmute_copy(&f))
-            else {
-                return Err(VulkanRendererError::MissingExtention(
-                    "vkCreateWaylandSurfaceKHR".to_string(),
-                ));
-            };
-
-            Ok(proc_addr)
-        }
-    }
-    unsafe fn load_instance_extensions(
-        entry: &Entry,
-        instance: vk::Instance,
-    ) -> Result<InstanceExtensions, VulkanRendererError> {
-        unsafe {
-            let create_debug_utils_messenger_ext =
-                Self::load_instance_proc_addr::<vk::PFN_vkCreateDebugUtilsMessengerEXT>(
-                    entry,
-                    instance,
-                    c"vkCreateDebugUtilsMessengerEXT",
-                )?;
-            let destroy_debug_utils_messenger_ext =
-                Self::load_instance_proc_addr::<vk::PFN_vkDestroyDebugUtilsMessengerEXT>(
-                    entry,
-                    instance,
-                    c"vkDestroyDebugUtilsMessengerEXT",
-                )?;
-
-            let create_wayland_surface_khr = Self::load_instance_proc_addr::<
-                vk::PFN_vkCreateWaylandSurfaceKHR,
-            >(
-                entry, instance, c"vkCreateWaylandSurfaceKHR"
-            )?;
-
-            let destroy_surface_khr = Self::load_instance_proc_addr::<vk::PFN_vkDestroySurfaceKHR>(
-                entry,
-                instance,
-                c"vkDestroySurfaceKHR",
-            )?;
-
-            Ok(InstanceExtensions {
-                create_debug_utils_messenger_ext,
-                destroy_debug_utils_messenger_ext,
-                create_wayland_surface_khr,
-                destroy_surface_khr,
-            })
-        }
-    }
-
     #[cfg(feature = "GLFW")]
     pub fn new_glfw_impl(
         name: &str,
@@ -555,9 +605,10 @@ impl VulkanRenderer {
             let debug_messenger =
                 Self::create_debug_messenger(&instance, &instance_extensions, enable_validation)?;
 
-            let (device, device_queues) = Self::create_device(&instance)?;
-
             let surface = Self::create_surface_glfw(&instance, &instance_extensions, window)?;
+
+            let (device, device_queues) =
+                Self::create_device(&instance, &instance_extensions, surface)?;
 
             Ok(Self {
                 _entry: entry,
