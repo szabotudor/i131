@@ -105,12 +105,18 @@ struct InstanceExtensions {
     destroy_surface_khr: vk::PFN_vkDestroySurfaceKHR,
     get_physical_device_surface_support_khr: vk::PFN_vkGetPhysicalDeviceSurfaceSupportKHR,
 }
+struct SwapchainSupportDetails {
+    capabilities: vk::SurfaceCapabilitiesKHR,
+    formats: Vec<vk::SurfaceFormatKHR>,
+    present_modes: Vec<vk::PresentModeKHR>,
+}
 pub struct VulkanRenderer {
     _entry: Entry,
     instance: Instance,
     instance_extensions: InstanceExtensions,
     device: Device,
     device_queues: DeviceQueues,
+    swapchain_details: SwapchainSupportDetails,
     surface: vk::SurfaceKHR,
     debug_messenger: Option<DebugMessengerData>,
 }
@@ -118,6 +124,8 @@ unsafe impl Send for VulkanRenderer {}
 unsafe impl Sync for VulkanRenderer {}
 
 impl VulkanRenderer {
+    const REQUIRED_DEVICE_EXTENSIONS: &[&CStr; 1] = &[vk::KHR_SWAPCHAIN_NAME];
+
     unsafe extern "system" fn debug_message_callback(
         message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
         _message_types: vk::DebugUtilsMessageTypeFlagsEXT,
@@ -394,6 +402,19 @@ impl VulkanRenderer {
             #[expect(unused_variables, reason = "No feature checks yet")]
             let device_features = instance.get_physical_device_features(physical_device);
 
+            let device_extensions =
+                instance.enumerate_device_extension_properties(physical_device)?;
+            let device_supports_required_extensions =
+                Self::REQUIRED_DEVICE_EXTENSIONS.iter().all(|ext| {
+                    device_extensions
+                        .iter()
+                        .any(|device_ext| CStr::from_ptr(device_ext.extension_name.as_ptr()) == ext)
+                });
+
+            if !device_supports_required_extensions {
+                return Ok((0, QueueFamilies::default()));
+            }
+
             let score = if (device_properties.device_type.as_raw()
                 & vk::PhysicalDeviceType::VIRTUAL_GPU.as_raw())
                 != 0
@@ -420,6 +441,82 @@ impl VulkanRenderer {
             }
 
             Ok((score, queue_families))
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    unsafe fn create_surface_wayland(
+        instance: &Instance,
+        instance_extensions: &InstanceExtensions,
+        window: WaylandWindowHandle,
+        display: WaylandDisplayHandle,
+    ) -> Result<vk::SurfaceKHR, VulkanRendererError> {
+        unsafe {
+            let create_info = vk::WaylandSurfaceCreateInfoKHR {
+                s_type: vk::WaylandSurfaceCreateInfoKHR::STRUCTURE_TYPE,
+                surface: window.surface.as_ptr(),
+                display: display.display.as_ptr(),
+                ..Default::default()
+            };
+
+            let mut surface = std::mem::MaybeUninit::<vk::SurfaceKHR>::uninit();
+
+            let res = (instance_extensions.create_wayland_surface_khr)(
+                instance.handle(),
+                &create_info as *const _,
+                null(),
+                surface.as_mut_ptr(),
+            );
+            if res.result().is_err() {
+                return Err(VulkanRendererError::SurfaceCreateFailure(
+                    "Wayland".to_string(),
+                ));
+            }
+
+            Ok(surface.assume_init())
+        }
+    }
+
+    #[cfg(feature = "GLFW")]
+    unsafe fn create_surface_glfw(
+        instance: &Instance,
+        instance_extensions: &InstanceExtensions,
+        window: &WindowDataGLFW,
+    ) -> Result<vk::SurfaceKHR, VulkanRendererError> {
+        unsafe {
+            use raw_window_handle::{
+                HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
+            };
+
+            let handle = window.window.window_handle()?;
+            let display_handle = window.window.display_handle()?;
+            match (handle.as_raw(), display_handle.as_raw()) {
+                #[cfg(target_os = "linux")]
+                (
+                    RawWindowHandle::Wayland(wayland_window_handle),
+                    RawDisplayHandle::Wayland(wayland_display_handle),
+                ) => Self::create_surface_wayland(
+                    instance,
+                    instance_extensions,
+                    wayland_window_handle,
+                    wayland_display_handle,
+                ),
+                #[cfg(target_os = "linux")]
+                (
+                    RawWindowHandle::Xlib(_xlib_window_handle),
+                    RawDisplayHandle::Xlib(_xlib_display_handle),
+                ) => {
+                    todo!("Implement X11 surface creation for vulkan")
+                }
+                #[cfg(target_os = "windows")]
+                RawWindowHandle::Win32(_win32_window_handle) => {
+                    todo!("Implement Win32 surface creation for vulkan")
+                }
+
+                other => Err(VulkanRendererError::UnknownGLFWError(format!(
+                    "Vulkan surface creation not implemented for: {other:?}"
+                ))),
+            }
         }
     }
 
@@ -504,80 +601,11 @@ impl VulkanRenderer {
         }
     }
 
-    #[cfg(target_os = "linux")]
-    unsafe fn create_surface_wayland(
+    fn create_swapchain(
         instance: &Instance,
-        instance_extensions: &InstanceExtensions,
-        window: WaylandWindowHandle,
-        display: WaylandDisplayHandle,
-    ) -> Result<vk::SurfaceKHR, VulkanRendererError> {
-        unsafe {
-            let create_info = vk::WaylandSurfaceCreateInfoKHR {
-                s_type: vk::WaylandSurfaceCreateInfoKHR::STRUCTURE_TYPE,
-                surface: window.surface.as_ptr(),
-                display: display.display.as_ptr(),
-                ..Default::default()
-            };
-
-            let mut surface = std::mem::MaybeUninit::<vk::SurfaceKHR>::uninit();
-
-            let res = (instance_extensions.create_wayland_surface_khr)(
-                instance.handle(),
-                &create_info as *const _,
-                null(),
-                surface.as_mut_ptr(),
-            );
-            if res.result().is_err() {
-                return Err(VulkanRendererError::SurfaceCreateFailure(
-                    "Wayland".to_string(),
-                ));
-            }
-
-            Ok(surface.assume_init())
-        }
-    }
-
-    #[cfg(feature = "GLFW")]
-    unsafe fn create_surface_glfw(
-        instance: &Instance,
-        instance_extensions: &InstanceExtensions,
-        window: &WindowDataGLFW,
-    ) -> Result<vk::SurfaceKHR, VulkanRendererError> {
-        unsafe {
-            use raw_window_handle::{
-                HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
-            };
-
-            let handle = window.window.window_handle()?;
-            let display_handle = window.window.display_handle()?;
-            match (handle.as_raw(), display_handle.as_raw()) {
-                #[cfg(target_os = "linux")]
-                (
-                    RawWindowHandle::Wayland(wayland_window_handle),
-                    RawDisplayHandle::Wayland(wayland_display_handle),
-                ) => Self::create_surface_wayland(
-                    instance,
-                    instance_extensions,
-                    wayland_window_handle,
-                    wayland_display_handle,
-                ),
-                #[cfg(target_os = "linux")]
-                (
-                    RawWindowHandle::Xlib(_xlib_window_handle),
-                    RawDisplayHandle::Xlib(_xlib_display_handle),
-                ) => {
-                    todo!("Implement X11 surface creation for vulkan")
-                }
-                #[cfg(target_os = "windows")]
-                RawWindowHandle::Win32(_win32_window_handle) => {
-                    todo!("Implement Win32 surface creation for vulkan")
-                }
-
-                other => Err(VulkanRendererError::UnknownGLFWError(format!(
-                    "Vulkan surface creation not implemented for: {other:?}"
-                ))),
-            }
-        }
+        device: &Device,
+    ) -> Result<SwapchainSupportDetails, VulkanRendererError> {
+        todo!()
     }
 
     #[cfg(feature = "GLFW")]
@@ -610,12 +638,15 @@ impl VulkanRenderer {
             let (device, device_queues) =
                 Self::create_device(&instance, &instance_extensions, surface)?;
 
+            let swapchain_details = Self::create_swapchain(&instance, &device)?;
+
             Ok(Self {
                 _entry: entry,
                 instance,
                 instance_extensions,
                 device,
                 device_queues,
+                swapchain_details,
                 surface,
                 debug_messenger,
             })
