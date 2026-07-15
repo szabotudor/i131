@@ -14,7 +14,7 @@ use raw_window_handle::{WaylandDisplayHandle, WaylandWindowHandle};
 use renderer131::{Renderer, RendererError, RendererInstanceError};
 use std::{
     ffi::{CStr, c_void},
-    ptr::null,
+    ptr::{null, null_mut},
     sync::{Arc, RwLock},
 };
 use thiserror::Error;
@@ -104,7 +104,12 @@ struct InstanceExtensions {
     create_wayland_surface_khr: vk::PFN_vkCreateWaylandSurfaceKHR,
     destroy_surface_khr: vk::PFN_vkDestroySurfaceKHR,
     get_physical_device_surface_support_khr: vk::PFN_vkGetPhysicalDeviceSurfaceSupportKHR,
+    get_physical_device_surface_capabilities_khr: vk::PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR,
+    get_physical_device_surface_formats_khr: vk::PFN_vkGetPhysicalDeviceSurfaceFormatsKHR,
+    get_physical_device_surface_present_modes_khr:
+        vk::PFN_vkGetPhysicalDeviceSurfacePresentModesKHR,
 }
+#[derive(Default)]
 struct SwapchainSupportDetails {
     capabilities: vk::SurfaceCapabilitiesKHR,
     formats: Vec<vk::SurfaceFormatKHR>,
@@ -234,6 +239,24 @@ impl VulkanRenderer {
                     instance,
                     c"vkGetPhysicalDeviceSurfaceSupportKHR",
                 )?;
+            let get_physical_device_surface_capabilities_khr =
+                Self::load_instance_proc_addr::<vk::PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR>(
+                    entry,
+                    instance,
+                    c"vkGetPhysicalDeviceSurfaceCapabilitiesKHR",
+                )?;
+            let get_physical_device_surface_formats_khr =
+                Self::load_instance_proc_addr::<vk::PFN_vkGetPhysicalDeviceSurfaceFormatsKHR>(
+                    entry,
+                    instance,
+                    c"vkGetPhysicalDeviceSurfaceFormatsKHR",
+                )?;
+            let get_physical_device_surface_present_modes_khr =
+                Self::load_instance_proc_addr::<vk::PFN_vkGetPhysicalDeviceSurfacePresentModesKHR>(
+                    entry,
+                    instance,
+                    c"vkGetPhysicalDeviceSurfacePresentModesKHR",
+                )?;
 
             Ok(InstanceExtensions {
                 create_debug_utils_messenger_ext,
@@ -241,6 +264,9 @@ impl VulkanRenderer {
                 create_wayland_surface_khr,
                 destroy_surface_khr,
                 get_physical_device_surface_support_khr,
+                get_physical_device_surface_capabilities_khr,
+                get_physical_device_surface_formats_khr,
+                get_physical_device_surface_present_modes_khr,
             })
         }
     }
@@ -396,7 +422,7 @@ impl VulkanRenderer {
         instance_extensions: &InstanceExtensions,
         physical_device: vk::PhysicalDevice,
         surface: vk::SurfaceKHR,
-    ) -> Result<(i32, QueueFamilies), VulkanRendererError> {
+    ) -> Result<(i32, QueueFamilies, SwapchainSupportDetails), VulkanRendererError> {
         unsafe {
             let device_properties = instance.get_physical_device_properties(physical_device);
             #[expect(unused_variables, reason = "No feature checks yet")]
@@ -411,8 +437,23 @@ impl VulkanRenderer {
                         .any(|device_ext| CStr::from_ptr(device_ext.extension_name.as_ptr()) == ext)
                 });
 
+            let swapchain_details =
+                Self::get_swapchain_details(instance_extensions, physical_device, surface)?;
+
+            if swapchain_details.formats.is_empty() || swapchain_details.present_modes.is_empty() {
+                return Ok((
+                    0,
+                    QueueFamilies::default(),
+                    SwapchainSupportDetails::default(),
+                ));
+            }
+
             if !device_supports_required_extensions {
-                return Ok((0, QueueFamilies::default()));
+                return Ok((
+                    0,
+                    QueueFamilies::default(),
+                    SwapchainSupportDetails::default(),
+                ));
             }
 
             let score = if (device_properties.device_type.as_raw()
@@ -431,16 +472,24 @@ impl VulkanRenderer {
             {
                 3
             } else {
-                return Ok((0, QueueFamilies::default()));
+                return Ok((
+                    0,
+                    QueueFamilies::default(),
+                    SwapchainSupportDetails::default(),
+                ));
             };
 
             let queue_families =
                 Self::find_queue_families(instance, instance_extensions, physical_device, surface)?;
             if queue_families.graphics.is_none() {
-                return Ok((0, QueueFamilies::default()));
+                return Ok((
+                    0,
+                    QueueFamilies::default(),
+                    SwapchainSupportDetails::default(),
+                ));
             }
 
-            Ok((score, queue_families))
+            Ok((score, queue_families, swapchain_details))
         }
     }
 
@@ -524,7 +573,15 @@ impl VulkanRenderer {
         instance: &Instance,
         instance_extensions: &InstanceExtensions,
         surface: vk::SurfaceKHR,
-    ) -> Result<(Device, DeviceQueues), VulkanRendererError> {
+    ) -> Result<
+        (
+            vk::PhysicalDevice,
+            Device,
+            DeviceQueues,
+            SwapchainSupportDetails,
+        ),
+        VulkanRendererError,
+    > {
         unsafe {
             let device = instance
                 .enumerate_physical_devices()?
@@ -543,15 +600,26 @@ impl VulkanRenderer {
                 .collect::<Result<Vec<_>, VulkanRendererError>>()?
                 .into_iter()
                 .filter(|(suitability, _)| suitability.0 > 0)
-                .fold(((0i32, QueueFamilies::default()), None), |acc, device| {
-                    if device.0.0 > acc.0.0 {
-                        (device.0, Some(device.1))
-                    } else {
-                        acc
-                    }
-                });
+                .fold(
+                    (
+                        (
+                            0i32,
+                            QueueFamilies::default(),
+                            SwapchainSupportDetails::default(),
+                        ),
+                        None,
+                    ),
+                    |acc, device| {
+                        if device.0.0 > acc.0.0 {
+                            (device.0, Some(device.1))
+                        } else {
+                            acc
+                        }
+                    },
+                );
             if let Some(physical_device) = device.1 {
                 let queue_families = device.0.1;
+                let swapchain_details = device.0.2;
                 let queue_priority = 1.0f32;
 
                 let queue_create_infos = [
@@ -575,11 +643,17 @@ impl VulkanRenderer {
                     },
                 ];
 
+                let required_extensions = Self::REQUIRED_DEVICE_EXTENSIONS
+                    .map(|ext| ext.as_ptr())
+                    .into_iter()
+                    .collect::<Vec<_>>();
                 let create_info = vk::DeviceCreateInfo {
                     s_type: vk::DeviceCreateInfo::STRUCTURE_TYPE,
                     p_queue_create_infos: queue_create_infos.as_ptr(),
                     queue_create_info_count: queue_create_infos.len() as u32,
                     p_enabled_features: null(),
+                    enabled_extension_count: required_extensions.len() as u32,
+                    pp_enabled_extension_names: required_extensions.as_ptr(),
                     ..Default::default()
                 };
 
@@ -594,18 +668,75 @@ impl VulkanRenderer {
                         .map(|idx| device.get_device_queue(idx, 0)),
                 };
 
-                Ok((device, device_queues))
+                Ok((physical_device, device, device_queues, swapchain_details))
             } else {
                 Err(VulkanRendererError::NoSupportedDevices)
             }
         }
     }
 
-    fn create_swapchain(
-        instance: &Instance,
-        device: &Device,
+    unsafe fn get_swapchain_details(
+        instance_extensions: &InstanceExtensions,
+        physical_device: vk::PhysicalDevice,
+        surface: vk::SurfaceKHR,
     ) -> Result<SwapchainSupportDetails, VulkanRendererError> {
-        todo!()
+        unsafe {
+            let mut surface_capabilities =
+                std::mem::MaybeUninit::<vk::SurfaceCapabilitiesKHR>::uninit();
+
+            // Read capabilities
+            (instance_extensions.get_physical_device_surface_capabilities_khr)(
+                physical_device,
+                surface,
+                surface_capabilities.as_mut_ptr(),
+            )
+            .result()?;
+
+            // Read supported formats
+            let mut format_count = 0u32;
+            (instance_extensions.get_physical_device_surface_formats_khr)(
+                physical_device,
+                surface,
+                &mut format_count as *mut u32,
+                null_mut::<vk::SurfaceFormatKHR>(),
+            )
+            .result()?;
+
+            let mut formats = vec![vk::SurfaceFormatKHR::default(); format_count as usize];
+            (instance_extensions.get_physical_device_surface_formats_khr)(
+                physical_device,
+                surface,
+                &mut format_count as *mut u32,
+                formats.as_mut_ptr(),
+            )
+            .result()?;
+
+            // Read supported present modes
+            let mut present_mode_count = 0u32;
+            (instance_extensions.get_physical_device_surface_present_modes_khr)(
+                physical_device,
+                surface,
+                &mut present_mode_count as *mut u32,
+                null_mut::<vk::PresentModeKHR>(),
+            )
+            .result()?;
+
+            let mut present_modes =
+                vec![vk::PresentModeKHR::default(); present_mode_count as usize];
+            (instance_extensions.get_physical_device_surface_present_modes_khr)(
+                physical_device,
+                surface,
+                &mut present_mode_count as *mut u32,
+                present_modes.as_mut_ptr(),
+            )
+            .result()?;
+
+            Ok(SwapchainSupportDetails {
+                capabilities: surface_capabilities.assume_init(),
+                formats,
+                present_modes,
+            })
+        }
     }
 
     #[cfg(feature = "GLFW")]
@@ -635,10 +766,8 @@ impl VulkanRenderer {
 
             let surface = Self::create_surface_glfw(&instance, &instance_extensions, window)?;
 
-            let (device, device_queues) =
+            let (_physical_device, device, device_queues, swapchain_details) =
                 Self::create_device(&instance, &instance_extensions, surface)?;
-
-            let swapchain_details = Self::create_swapchain(&instance, &device)?;
 
             Ok(Self {
                 _entry: entry,
