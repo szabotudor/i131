@@ -417,6 +417,70 @@ impl VulkanRenderer {
         }
     }
 
+    unsafe fn get_swapchain_details(
+        instance_extensions: &InstanceExtensions,
+        physical_device: vk::PhysicalDevice,
+        surface: vk::SurfaceKHR,
+    ) -> Result<SwapchainSupportDetails, VulkanRendererError> {
+        unsafe {
+            let mut surface_capabilities =
+                std::mem::MaybeUninit::<vk::SurfaceCapabilitiesKHR>::uninit();
+
+            // Read capabilities
+            (instance_extensions.get_physical_device_surface_capabilities_khr)(
+                physical_device,
+                surface,
+                surface_capabilities.as_mut_ptr(),
+            )
+            .result()?;
+
+            // Read supported formats
+            let mut format_count = 0u32;
+            (instance_extensions.get_physical_device_surface_formats_khr)(
+                physical_device,
+                surface,
+                &mut format_count as *mut u32,
+                null_mut::<vk::SurfaceFormatKHR>(),
+            )
+            .result()?;
+
+            let mut formats = vec![vk::SurfaceFormatKHR::default(); format_count as usize];
+            (instance_extensions.get_physical_device_surface_formats_khr)(
+                physical_device,
+                surface,
+                &mut format_count as *mut u32,
+                formats.as_mut_ptr(),
+            )
+            .result()?;
+
+            // Read supported present modes
+            let mut present_mode_count = 0u32;
+            (instance_extensions.get_physical_device_surface_present_modes_khr)(
+                physical_device,
+                surface,
+                &mut present_mode_count as *mut u32,
+                null_mut::<vk::PresentModeKHR>(),
+            )
+            .result()?;
+
+            let mut present_modes =
+                vec![vk::PresentModeKHR::default(); present_mode_count as usize];
+            (instance_extensions.get_physical_device_surface_present_modes_khr)(
+                physical_device,
+                surface,
+                &mut present_mode_count as *mut u32,
+                present_modes.as_mut_ptr(),
+            )
+            .result()?;
+
+            Ok(SwapchainSupportDetails {
+                capabilities: surface_capabilities.assume_init(),
+                formats,
+                present_modes,
+            })
+        }
+    }
+
     unsafe fn get_device_suitability_score(
         instance: &Instance,
         instance_extensions: &InstanceExtensions,
@@ -672,70 +736,6 @@ impl VulkanRenderer {
             } else {
                 Err(VulkanRendererError::NoSupportedDevices)
             }
-        }
-    }
-
-    unsafe fn get_swapchain_details(
-        instance_extensions: &InstanceExtensions,
-        physical_device: vk::PhysicalDevice,
-        surface: vk::SurfaceKHR,
-    ) -> Result<SwapchainSupportDetails, VulkanRendererError> {
-        unsafe {
-            let mut surface_capabilities =
-                std::mem::MaybeUninit::<vk::SurfaceCapabilitiesKHR>::uninit();
-
-            // Read capabilities
-            (instance_extensions.get_physical_device_surface_capabilities_khr)(
-                physical_device,
-                surface,
-                surface_capabilities.as_mut_ptr(),
-            )
-            .result()?;
-
-            // Read supported formats
-            let mut format_count = 0u32;
-            (instance_extensions.get_physical_device_surface_formats_khr)(
-                physical_device,
-                surface,
-                &mut format_count as *mut u32,
-                null_mut::<vk::SurfaceFormatKHR>(),
-            )
-            .result()?;
-
-            let mut formats = vec![vk::SurfaceFormatKHR::default(); format_count as usize];
-            (instance_extensions.get_physical_device_surface_formats_khr)(
-                physical_device,
-                surface,
-                &mut format_count as *mut u32,
-                formats.as_mut_ptr(),
-            )
-            .result()?;
-
-            // Read supported present modes
-            let mut present_mode_count = 0u32;
-            (instance_extensions.get_physical_device_surface_present_modes_khr)(
-                physical_device,
-                surface,
-                &mut present_mode_count as *mut u32,
-                null_mut::<vk::PresentModeKHR>(),
-            )
-            .result()?;
-
-            let mut present_modes =
-                vec![vk::PresentModeKHR::default(); present_mode_count as usize];
-            (instance_extensions.get_physical_device_surface_present_modes_khr)(
-                physical_device,
-                surface,
-                &mut present_mode_count as *mut u32,
-                present_modes.as_mut_ptr(),
-            )
-            .result()?;
-
-            Ok(SwapchainSupportDetails {
-                capabilities: surface_capabilities.assume_init(),
-                formats,
-                present_modes,
-            })
         }
     }
 
