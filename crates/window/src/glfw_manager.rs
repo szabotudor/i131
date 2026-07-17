@@ -1,4 +1,4 @@
-use glfw::{Context, Glfw, GlfwReceiver, PWindow, WindowEvent};
+use glfw::{ClientApiHint, Glfw, GlfwReceiver, PWindow, WindowEvent, WindowHint};
 
 use crate::WindowError;
 
@@ -20,6 +20,8 @@ impl super::Window {
 
     pub fn new(settings: super::WindowSettings) -> Result<Self, WindowError> {
         let mut glfw = glfw::init(Self::glfw_error_callback)?;
+
+        glfw.window_hint(WindowHint::ClientApi(ClientApiHint::NoApi));
         let Some((window, events)) = glfw.create_window(
             settings.size.x,
             settings.size.y,
@@ -48,8 +50,6 @@ impl super::Window {
     }
 
     pub fn update(&mut self) {
-        self.data.window.make_current();
-        self.data.window.swap_buffers();
         self.data.glfw.poll_events();
 
         for (_e, event) in glfw::flush_messages(&self.data.events) {
@@ -57,7 +57,5 @@ impl super::Window {
                 self.should_close = true;
             }
         }
-
-        glfw::make_context_current(None);
     }
 }
