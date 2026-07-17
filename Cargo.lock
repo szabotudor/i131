@@ -1006,6 +1006,7 @@ name = "vulkan-renderer"
 version = "0.1.0"
 dependencies = [
  "ash",
+ "math131",
  "raw-window-handle",
  "renderer131",
  "thiserror",

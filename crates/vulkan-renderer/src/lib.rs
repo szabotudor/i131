@@ -1,10 +1,5 @@
 use ash::{
-    Device,
-    Entry,
-    Instance,
-    LoadingError,
-    // Should only be `self` and `TaggedStructure`
-    // Everything in `vk::` should use explicit paths to be descriptive
+    Device, Entry, Instance, LoadingError,
     vk::{self, TaggedStructure},
 };
 #[cfg(feature = "GLFW")]
@@ -52,6 +47,13 @@ pub enum VulkanRendererError {
     #[error("There are no physical devices that support vulkan")]
     NoSupportedDevices,
 
+    #[error("No valid surface formats found")]
+    NoValidSurfaceFormat,
+
+    // Possibly not needed
+    #[error("No valid swap present mode found")]
+    NoValidPresentMode,
+
     #[error("Error loading vulkan library: {0}")]
     LoadingError(#[from] LoadingError),
 
@@ -89,7 +91,7 @@ struct DebugMessengerData {
     p_user_data_ptr: *mut c_void,
 }
 #[derive(Default, Debug)]
-struct QueueFamilies {
+struct QueueFamilyIndices {
     graphics: Option<u32>,
     present: Option<u32>,
 }
@@ -108,6 +110,9 @@ struct InstanceExtensions {
     get_physical_device_surface_formats_khr: vk::PFN_vkGetPhysicalDeviceSurfaceFormatsKHR,
     get_physical_device_surface_present_modes_khr:
         vk::PFN_vkGetPhysicalDeviceSurfacePresentModesKHR,
+    create_swapchain_khr: vk::PFN_vkCreateSwapchainKHR,
+    destroy_swapchain_khr: vk::PFN_vkDestroySwapchainKHR,
+    get_swapchain_images_khr: vk::PFN_vkGetSwapchainImagesKHR,
 }
 #[derive(Default)]
 struct SwapchainSupportDetails {
@@ -122,11 +127,24 @@ pub struct VulkanRenderer {
     device: Device,
     device_queues: DeviceQueues,
     swapchain_details: SwapchainSupportDetails,
+    swapchain: vk::SwapchainKHR,
+    swapchain_images: Vec<vk::Image>,
     surface: vk::SurfaceKHR,
     debug_messenger: Option<DebugMessengerData>,
 }
 unsafe impl Send for VulkanRenderer {}
 unsafe impl Sync for VulkanRenderer {}
+
+struct CreateSwapchainArgs<'a> {
+    instance_extensions: &'a InstanceExtensions,
+    device: vk::Device,
+    swapchain_details: &'a SwapchainSupportDetails,
+    queue_family_indices: &'a QueueFamilyIndices,
+    surface: vk::SurfaceKHR,
+    format: vk::SurfaceFormatKHR,
+    present_mode: vk::PresentModeKHR,
+    extent: vk::Extent2D,
+}
 
 impl VulkanRenderer {
     const REQUIRED_DEVICE_EXTENSIONS: &[&CStr; 1] = &[vk::KHR_SWAPCHAIN_NAME];
@@ -209,54 +227,43 @@ impl VulkanRenderer {
     ) -> Result<InstanceExtensions, VulkanRendererError> {
         unsafe {
             let create_debug_utils_messenger_ext =
-                Self::load_instance_proc_addr::<vk::PFN_vkCreateDebugUtilsMessengerEXT>(
-                    entry,
-                    instance,
-                    c"vkCreateDebugUtilsMessengerEXT",
-                )?;
+                Self::load_instance_proc_addr(entry, instance, c"vkCreateDebugUtilsMessengerEXT")?;
             let destroy_debug_utils_messenger_ext =
-                Self::load_instance_proc_addr::<vk::PFN_vkDestroyDebugUtilsMessengerEXT>(
-                    entry,
-                    instance,
-                    c"vkDestroyDebugUtilsMessengerEXT",
-                )?;
+                Self::load_instance_proc_addr(entry, instance, c"vkDestroyDebugUtilsMessengerEXT")?;
 
-            let create_wayland_surface_khr = Self::load_instance_proc_addr::<
-                vk::PFN_vkCreateWaylandSurfaceKHR,
-            >(
-                entry, instance, c"vkCreateWaylandSurfaceKHR"
-            )?;
+            let create_wayland_surface_khr =
+                Self::load_instance_proc_addr(entry, instance, c"vkCreateWaylandSurfaceKHR")?;
 
-            let destroy_surface_khr = Self::load_instance_proc_addr::<vk::PFN_vkDestroySurfaceKHR>(
+            let destroy_surface_khr =
+                Self::load_instance_proc_addr(entry, instance, c"vkDestroySurfaceKHR")?;
+
+            let get_physical_device_surface_support_khr = Self::load_instance_proc_addr(
                 entry,
                 instance,
-                c"vkDestroySurfaceKHR",
+                c"vkGetPhysicalDeviceSurfaceSupportKHR",
+            )?;
+            let get_physical_device_surface_capabilities_khr = Self::load_instance_proc_addr(
+                entry,
+                instance,
+                c"vkGetPhysicalDeviceSurfaceCapabilitiesKHR",
+            )?;
+            let get_physical_device_surface_formats_khr = Self::load_instance_proc_addr(
+                entry,
+                instance,
+                c"vkGetPhysicalDeviceSurfaceFormatsKHR",
+            )?;
+            let get_physical_device_surface_present_modes_khr = Self::load_instance_proc_addr(
+                entry,
+                instance,
+                c"vkGetPhysicalDeviceSurfacePresentModesKHR",
             )?;
 
-            let get_physical_device_surface_support_khr =
-                Self::load_instance_proc_addr::<vk::PFN_vkGetPhysicalDeviceSurfaceSupportKHR>(
-                    entry,
-                    instance,
-                    c"vkGetPhysicalDeviceSurfaceSupportKHR",
-                )?;
-            let get_physical_device_surface_capabilities_khr =
-                Self::load_instance_proc_addr::<vk::PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR>(
-                    entry,
-                    instance,
-                    c"vkGetPhysicalDeviceSurfaceCapabilitiesKHR",
-                )?;
-            let get_physical_device_surface_formats_khr =
-                Self::load_instance_proc_addr::<vk::PFN_vkGetPhysicalDeviceSurfaceFormatsKHR>(
-                    entry,
-                    instance,
-                    c"vkGetPhysicalDeviceSurfaceFormatsKHR",
-                )?;
-            let get_physical_device_surface_present_modes_khr =
-                Self::load_instance_proc_addr::<vk::PFN_vkGetPhysicalDeviceSurfacePresentModesKHR>(
-                    entry,
-                    instance,
-                    c"vkGetPhysicalDeviceSurfacePresentModesKHR",
-                )?;
+            let create_swapchain_khr =
+                Self::load_instance_proc_addr(entry, instance, c"vkCreateSwapchainKHR")?;
+            let destroy_swapchain_khr =
+                Self::load_instance_proc_addr(entry, instance, c"vkDestroySwapchainKHR")?;
+            let get_swapchain_images_khr =
+                Self::load_instance_proc_addr(entry, instance, c"vkGetSwapchainImagesKHR")?;
 
             Ok(InstanceExtensions {
                 create_debug_utils_messenger_ext,
@@ -267,6 +274,9 @@ impl VulkanRenderer {
                 get_physical_device_surface_capabilities_khr,
                 get_physical_device_surface_formats_khr,
                 get_physical_device_surface_present_modes_khr,
+                create_swapchain_khr,
+                destroy_swapchain_khr,
+                get_swapchain_images_khr,
             })
         }
     }
@@ -388,11 +398,11 @@ impl VulkanRenderer {
         instance_extensions: &InstanceExtensions,
         physical_device: vk::PhysicalDevice,
         surface: vk::SurfaceKHR,
-    ) -> Result<QueueFamilies, VulkanRendererError> {
+    ) -> Result<QueueFamilyIndices, VulkanRendererError> {
         unsafe {
             let queue_families =
                 instance.get_physical_device_queue_family_properties(physical_device);
-            let mut res = QueueFamilies::default();
+            let mut res = QueueFamilyIndices::default();
 
             for (index, queue_family) in queue_families.iter().enumerate() {
                 if (queue_family.queue_flags & vk::QueueFlags::GRAPHICS).as_raw() != 0 {
@@ -486,7 +496,7 @@ impl VulkanRenderer {
         instance_extensions: &InstanceExtensions,
         physical_device: vk::PhysicalDevice,
         surface: vk::SurfaceKHR,
-    ) -> Result<(i32, QueueFamilies, SwapchainSupportDetails), VulkanRendererError> {
+    ) -> Result<(i32, QueueFamilyIndices, SwapchainSupportDetails), VulkanRendererError> {
         unsafe {
             let device_properties = instance.get_physical_device_properties(physical_device);
             #[expect(unused_variables, reason = "No feature checks yet")]
@@ -507,7 +517,7 @@ impl VulkanRenderer {
             if swapchain_details.formats.is_empty() || swapchain_details.present_modes.is_empty() {
                 return Ok((
                     0,
-                    QueueFamilies::default(),
+                    QueueFamilyIndices::default(),
                     SwapchainSupportDetails::default(),
                 ));
             }
@@ -515,7 +525,7 @@ impl VulkanRenderer {
             if !device_supports_required_extensions {
                 return Ok((
                     0,
-                    QueueFamilies::default(),
+                    QueueFamilyIndices::default(),
                     SwapchainSupportDetails::default(),
                 ));
             }
@@ -538,22 +548,22 @@ impl VulkanRenderer {
             } else {
                 return Ok((
                     0,
-                    QueueFamilies::default(),
+                    QueueFamilyIndices::default(),
                     SwapchainSupportDetails::default(),
                 ));
             };
 
-            let queue_families =
+            let queue_family_indices =
                 Self::find_queue_families(instance, instance_extensions, physical_device, surface)?;
-            if queue_families.graphics.is_none() {
+            if queue_family_indices.graphics.is_none() {
                 return Ok((
                     0,
-                    QueueFamilies::default(),
+                    QueueFamilyIndices::default(),
                     SwapchainSupportDetails::default(),
                 ));
             }
 
-            Ok((score, queue_families, swapchain_details))
+            Ok((score, queue_family_indices, swapchain_details))
         }
     }
 
@@ -641,6 +651,7 @@ impl VulkanRenderer {
         (
             vk::PhysicalDevice,
             Device,
+            QueueFamilyIndices,
             DeviceQueues,
             SwapchainSupportDetails,
         ),
@@ -663,33 +674,71 @@ impl VulkanRenderer {
                 })
                 .collect::<Result<Vec<_>, VulkanRendererError>>()?
                 .into_iter()
-                .filter(|(suitability, _)| suitability.0 > 0)
+                .filter(
+                    |(
+                        (suitability_score, _queue_family_indices, _swapchain_details),
+                        _physical_device,
+                    )| { *suitability_score > 0 },
+                )
+                // Find the one device with the best score.
+                //
+                // If there are multiple devices with the largest score, the first is chosen
                 .fold(
+                    // Default empty device
                     (
                         (
                             0i32,
-                            QueueFamilies::default(),
+                            QueueFamilyIndices::default(),
                             SwapchainSupportDetails::default(),
                         ),
                         None,
                     ),
+                    // TODO: Difficult to understand, should organize the fold function
                     |acc, device| {
-                        if device.0.0 > acc.0.0 {
-                            (device.0, Some(device.1))
+                        let (
+                            (
+                                acc_device_suitability_score,
+                                acc_queue_family_indices,
+                                acc_swapchain_details,
+                            ),
+                            acc_physical_device,
+                        ) = acc;
+
+                        let (
+                            (device_suitability_score, queue_family_indices, swapchain_details),
+                            physical_device,
+                        ) = device;
+
+                        if device_suitability_score > acc_device_suitability_score {
+                            (
+                                (
+                                    device_suitability_score,
+                                    queue_family_indices,
+                                    swapchain_details,
+                                ),
+                                Some(physical_device),
+                            )
                         } else {
-                            acc
+                            (
+                                (
+                                    acc_device_suitability_score,
+                                    acc_queue_family_indices,
+                                    acc_swapchain_details,
+                                ),
+                                acc_physical_device,
+                            )
                         }
                     },
                 );
             if let Some(physical_device) = device.1 {
-                let queue_families = device.0.1;
+                let queue_family_indices = device.0.1;
                 let swapchain_details = device.0.2;
                 let queue_priority = 1.0f32;
 
                 let queue_create_infos = [
                     vk::DeviceQueueCreateInfo {
                         s_type: vk::DeviceQueueCreateInfo::STRUCTURE_TYPE,
-                        queue_family_index: queue_families.graphics.ok_or_else(|| {
+                        queue_family_index: queue_family_indices.graphics.ok_or_else(|| {
                             VulkanRendererError::MissingQueue("GRAPHICS".to_string())
                         })?,
                         queue_count: 1,
@@ -698,7 +747,7 @@ impl VulkanRenderer {
                     },
                     vk::DeviceQueueCreateInfo {
                         s_type: vk::DeviceQueueCreateInfo::STRUCTURE_TYPE,
-                        queue_family_index: queue_families.present.ok_or_else(|| {
+                        queue_family_index: queue_family_indices.present.ok_or_else(|| {
                             VulkanRendererError::MissingQueue("PRESENT".to_string())
                         })?,
                         queue_count: 1,
@@ -724,18 +773,200 @@ impl VulkanRenderer {
                 let device = instance.create_device(physical_device, &create_info, None)?;
 
                 let device_queues = DeviceQueues {
-                    graphics: queue_families
+                    graphics: queue_family_indices
                         .graphics
                         .map(|idx| device.get_device_queue(idx, 0)),
-                    present: queue_families
+                    present: queue_family_indices
                         .present
                         .map(|idx| device.get_device_queue(idx, 0)),
                 };
 
-                Ok((physical_device, device, device_queues, swapchain_details))
+                Ok((
+                    physical_device,
+                    device,
+                    queue_family_indices,
+                    device_queues,
+                    swapchain_details,
+                ))
             } else {
                 Err(VulkanRendererError::NoSupportedDevices)
             }
+        }
+    }
+
+    fn choose_swapchain_format(
+        formats: &[vk::SurfaceFormatKHR],
+    ) -> Result<vk::SurfaceFormatKHR, VulkanRendererError> {
+        if formats.is_empty() {
+            return Err(VulkanRendererError::NoValidSurfaceFormat);
+        }
+        let preferred = vk::SurfaceFormatKHR {
+            format: vk::Format::R8G8B8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+
+        if formats.contains(&preferred) {
+            return Ok(preferred);
+        }
+
+        Ok(formats[0])
+    }
+    fn choose_swap_present_mode(
+        present_modes: &[vk::PresentModeKHR],
+    ) -> Result<vk::PresentModeKHR, VulkanRendererError> {
+        if present_modes.contains(&vk::PresentModeKHR::MAILBOX) {
+            return Ok(vk::PresentModeKHR::MAILBOX);
+        }
+
+        Ok(vk::PresentModeKHR::FIFO)
+    }
+    fn choose_swap_extent(
+        capabilities: &vk::SurfaceCapabilitiesKHR,
+        current_extent: vk::Extent2D,
+    ) -> Result<vk::Extent2D, VulkanRendererError> {
+        if capabilities.current_extent.width != u32::MAX {
+            Ok(capabilities.current_extent)
+        } else {
+            Ok(vk::Extent2D {
+                width: math131::util::clamp(
+                    current_extent.width,
+                    capabilities.min_image_extent.width,
+                    capabilities.max_image_extent.width,
+                ),
+                height: math131::util::clamp(
+                    current_extent.height,
+                    capabilities.min_image_extent.height,
+                    capabilities.max_image_extent.height,
+                ),
+            })
+        }
+    }
+
+    unsafe fn create_swapchain(
+        args: CreateSwapchainArgs,
+    ) -> Result<(vk::SwapchainKHR, Vec<vk::Image>), VulkanRendererError> {
+        unsafe {
+            let CreateSwapchainArgs {
+                instance_extensions,
+                device,
+                swapchain_details,
+                queue_family_indices,
+                surface,
+                format,
+                present_mode,
+                extent,
+            } = args;
+
+            let mut image_count = swapchain_details.capabilities.min_image_count + 1;
+
+            if swapchain_details.capabilities.max_image_count != 0
+                && image_count > swapchain_details.capabilities.max_image_count
+            {
+                image_count = swapchain_details.capabilities.max_image_count;
+            }
+
+            let mut swapchain_create_info = vk::SwapchainCreateInfoKHR {
+                s_type: vk::SwapchainCreateInfoKHR::STRUCTURE_TYPE,
+                surface,
+                min_image_count: image_count,
+                image_format: format.format,
+                image_color_space: format.color_space,
+                image_extent: extent,
+                image_array_layers: 1,
+                image_usage: vk::ImageUsageFlags::COLOR_ATTACHMENT,
+                pre_transform: swapchain_details.capabilities.current_transform,
+                composite_alpha: vk::CompositeAlphaFlagsKHR::OPAQUE,
+                present_mode,
+                clipped: vk::TRUE,
+                old_swapchain: vk::SwapchainKHR::null(),
+                ..Default::default()
+            };
+
+            let Some((graphics_queue, present_queue)) = queue_family_indices
+                .graphics
+                .zip(queue_family_indices.present)
+            else {
+                return Err(VulkanRendererError::MissingQueue(
+                    "PRESENT or GRAPHICS".to_string(),
+                ));
+            };
+
+            let queue_family_indices_array = [graphics_queue, present_queue];
+
+            if graphics_queue != present_queue {
+                swapchain_create_info.image_sharing_mode = vk::SharingMode::CONCURRENT;
+                swapchain_create_info.queue_family_index_count = 2;
+                swapchain_create_info.p_queue_family_indices = queue_family_indices_array.as_ptr();
+            } else {
+                swapchain_create_info.image_sharing_mode = vk::SharingMode::EXCLUSIVE;
+                swapchain_create_info.queue_family_index_count = 0;
+                swapchain_create_info.p_queue_family_indices = null();
+            }
+
+            let mut swapchain = vk::SwapchainKHR::default();
+
+            (instance_extensions.create_swapchain_khr)(
+                device,
+                &swapchain_create_info as *const _,
+                null(),
+                &mut swapchain as *mut vk::SwapchainKHR,
+            )
+            .result()?;
+
+            let mut swapchain_image_count = 0u32;
+            (instance_extensions.get_swapchain_images_khr)(
+                device,
+                swapchain,
+                &mut swapchain_image_count as *mut u32,
+                null_mut(),
+            )
+            .result()?;
+
+            let mut swapchain_images = vec![vk::Image::default(); swapchain_image_count as usize];
+            (instance_extensions.get_swapchain_images_khr)(
+                device,
+                swapchain,
+                &mut swapchain_image_count as *mut u32,
+                swapchain_images.as_mut_ptr(),
+            )
+            .result()?;
+
+            Ok((swapchain, swapchain_images))
+        }
+    }
+
+    #[cfg(feature = "GLFW")]
+    unsafe fn create_swapchain_glfw(
+        instance_extensions: &InstanceExtensions,
+        device: vk::Device,
+        swapchain_details: &SwapchainSupportDetails,
+        surface: vk::SurfaceKHR,
+        queue_family_indices: &QueueFamilyIndices,
+        window: &WindowDataGLFW,
+    ) -> Result<(vk::SwapchainKHR, Vec<vk::Image>), VulkanRendererError> {
+        unsafe {
+            let window_extent = window.window.get_framebuffer_size();
+            let window_extent = vk::Extent2D {
+                width: window_extent.0 as u32,
+                height: window_extent.1 as u32,
+            };
+
+            let format = Self::choose_swapchain_format(&swapchain_details.formats)?;
+            let present_mode = Self::choose_swap_present_mode(&swapchain_details.present_modes)?;
+            let extent = Self::choose_swap_extent(&swapchain_details.capabilities, window_extent)?;
+
+            let swapchain = Self::create_swapchain(CreateSwapchainArgs {
+                instance_extensions,
+                device,
+                swapchain_details,
+                queue_family_indices,
+                surface,
+                format,
+                present_mode,
+                extent,
+            })?;
+
+            Ok(swapchain)
         }
     }
 
@@ -766,8 +997,17 @@ impl VulkanRenderer {
 
             let surface = Self::create_surface_glfw(&instance, &instance_extensions, window)?;
 
-            let (_physical_device, device, device_queues, swapchain_details) =
+            let (_physical_device, device, queue_family_indices, device_queues, swapchain_details) =
                 Self::create_device(&instance, &instance_extensions, surface)?;
+
+            let (swapchain, swapchain_images) = Self::create_swapchain_glfw(
+                &instance_extensions,
+                device.handle(),
+                &swapchain_details,
+                surface,
+                &queue_family_indices,
+                window,
+            )?;
 
             Ok(Self {
                 _entry: entry,
@@ -776,6 +1016,8 @@ impl VulkanRenderer {
                 device,
                 device_queues,
                 swapchain_details,
+                swapchain,
+                swapchain_images,
                 surface,
                 debug_messenger,
             })
@@ -821,6 +1063,11 @@ impl Drop for VulkanRenderer {
         self.debug_messenger = None;
 
         unsafe {
+            (self.instance_extensions.destroy_swapchain_khr)(
+                self.device.handle(),
+                self.swapchain,
+                null(),
+            );
             self.device.destroy_device(None);
             (self.instance_extensions.destroy_surface_khr)(
                 self.instance.handle(),
