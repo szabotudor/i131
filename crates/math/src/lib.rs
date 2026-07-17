@@ -3,6 +3,7 @@ mod math;
 mod simd;
 #[cfg(feature = "swizzle")]
 mod swizzles;
+pub mod util;
 mod vectors;
 
 pub use vectors::*;
