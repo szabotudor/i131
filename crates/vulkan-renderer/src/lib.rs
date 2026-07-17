@@ -120,15 +120,22 @@ struct SwapchainSupportDetails {
     formats: Vec<vk::SurfaceFormatKHR>,
     present_modes: Vec<vk::PresentModeKHR>,
 }
+#[derive(Default)]
+struct SwapchainData {
+    swapchain_details: SwapchainSupportDetails,
+    swapchain: vk::SwapchainKHR,
+    format: vk::SurfaceFormatKHR,
+    present_mode: vk::PresentModeKHR,
+    swapchain_images: Vec<vk::Image>,
+    swapchain_image_views: Vec<vk::ImageView>,
+}
 pub struct VulkanRenderer {
     _entry: Entry,
     instance: Instance,
     instance_extensions: InstanceExtensions,
     device: Device,
     device_queues: DeviceQueues,
-    swapchain_details: SwapchainSupportDetails,
-    swapchain: vk::SwapchainKHR,
-    swapchain_images: Vec<vk::Image>,
+    swapchain: SwapchainData,
     surface: vk::SurfaceKHR,
     debug_messenger: Option<DebugMessengerData>,
 }
@@ -935,15 +942,54 @@ impl VulkanRenderer {
         }
     }
 
+    unsafe fn create_swapchain_image_views(
+        device: &Device,
+        swapchain_format: vk::SurfaceFormatKHR,
+        swapchain_images: &[vk::Image],
+    ) -> Result<Vec<vk::ImageView>, VulkanRendererError> {
+        unsafe {
+            let image_views = swapchain_images
+                .iter()
+                .map(|image| {
+                    let image_view_create_info = vk::ImageViewCreateInfo {
+                        s_type: vk::ImageViewCreateInfo::STRUCTURE_TYPE,
+                        image: *image,
+                        view_type: vk::ImageViewType::TYPE_2D,
+                        format: swapchain_format.format,
+                        components: vk::ComponentMapping {
+                            r: vk::ComponentSwizzle::IDENTITY,
+                            g: vk::ComponentSwizzle::IDENTITY,
+                            b: vk::ComponentSwizzle::IDENTITY,
+                            a: vk::ComponentSwizzle::IDENTITY,
+                        },
+                        subresource_range: vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0,
+                            level_count: 1,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        },
+                        ..Default::default()
+                    };
+
+                    let image_view = device.create_image_view(&image_view_create_info, None)?;
+                    Ok(image_view)
+                })
+                .collect::<Result<Vec<_>, VulkanRendererError>>()?;
+
+            Ok(image_views)
+        }
+    }
+
     #[cfg(feature = "GLFW")]
     unsafe fn create_swapchain_glfw(
         instance_extensions: &InstanceExtensions,
-        device: vk::Device,
-        swapchain_details: &SwapchainSupportDetails,
+        device: &Device,
+        swapchain_details: SwapchainSupportDetails,
         surface: vk::SurfaceKHR,
         queue_family_indices: &QueueFamilyIndices,
         window: &WindowDataGLFW,
-    ) -> Result<(vk::SwapchainKHR, Vec<vk::Image>), VulkanRendererError> {
+    ) -> Result<SwapchainData, VulkanRendererError> {
         unsafe {
             let window_extent = window.window.get_framebuffer_size();
             let window_extent = vk::Extent2D {
@@ -955,10 +1001,10 @@ impl VulkanRenderer {
             let present_mode = Self::choose_swap_present_mode(&swapchain_details.present_modes)?;
             let extent = Self::choose_swap_extent(&swapchain_details.capabilities, window_extent)?;
 
-            let swapchain = Self::create_swapchain(CreateSwapchainArgs {
+            let (swapchain, swapchain_images) = Self::create_swapchain(CreateSwapchainArgs {
                 instance_extensions,
-                device,
-                swapchain_details,
+                device: device.handle(),
+                swapchain_details: &swapchain_details,
                 queue_family_indices,
                 surface,
                 format,
@@ -966,7 +1012,17 @@ impl VulkanRenderer {
                 extent,
             })?;
 
-            Ok(swapchain)
+            let swapchain_image_views =
+                Self::create_swapchain_image_views(device, format, &swapchain_images)?;
+
+            Ok(SwapchainData {
+                swapchain_details,
+                swapchain,
+                format,
+                present_mode,
+                swapchain_images,
+                swapchain_image_views,
+            })
         }
     }
 
@@ -1000,10 +1056,10 @@ impl VulkanRenderer {
             let (_physical_device, device, queue_family_indices, device_queues, swapchain_details) =
                 Self::create_device(&instance, &instance_extensions, surface)?;
 
-            let (swapchain, swapchain_images) = Self::create_swapchain_glfw(
+            let swapchain = Self::create_swapchain_glfw(
                 &instance_extensions,
-                device.handle(),
-                &swapchain_details,
+                &device,
+                swapchain_details,
                 surface,
                 &queue_family_indices,
                 window,
@@ -1015,9 +1071,7 @@ impl VulkanRenderer {
                 instance_extensions,
                 device,
                 device_queues,
-                swapchain_details,
                 swapchain,
-                swapchain_images,
                 surface,
                 debug_messenger,
             })
@@ -1063,11 +1117,18 @@ impl Drop for VulkanRenderer {
         self.debug_messenger = None;
 
         unsafe {
+            for image_view in &self.swapchain.swapchain_image_views {
+                self.device.destroy_image_view(*image_view, None);
+            }
+            self.swapchain.swapchain_image_views.clear();
+
             (self.instance_extensions.destroy_swapchain_khr)(
                 self.device.handle(),
-                self.swapchain,
+                self.swapchain.swapchain,
                 null(),
             );
+            self.swapchain = SwapchainData::default();
+
             self.device.destroy_device(None);
             (self.instance_extensions.destroy_surface_khr)(
                 self.instance.handle(),
