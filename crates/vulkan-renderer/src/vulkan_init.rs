@@ -10,7 +10,6 @@ use ash::{
 };
 #[cfg(target_os = "linux")]
 use raw_window_handle::{WaylandDisplayHandle, WaylandWindowHandle};
-use renderer131::RendererError;
 use std::{
     ffi::{CStr, c_void},
     ptr::{null, null_mut},

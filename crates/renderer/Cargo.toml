@@ -7,4 +7,6 @@ edition.workspace = true
 window131 = { workspace = true }
 
 thiserror.workspace = true
+serde.workspace = true
+toml.workspace = true
 

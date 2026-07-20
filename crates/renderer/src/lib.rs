@@ -1,7 +1,8 @@
 use std::fmt::{Debug, Display};
-
 use thiserror::Error;
 pub use window131::Window;
+
+pub mod build_tools;
 
 #[derive(Error, Debug)]
 pub enum RendererError {
@@ -39,8 +40,15 @@ impl<T> OptionRendererError<T> for Option<T> {
     }
 }
 
+pub struct ShaderID {
+    pub raw: usize,
+}
+
 pub trait Renderer
 where
     Self: Send + Sync,
 {
+    fn name(&self) -> &'static str;
+
+    fn create_shader(&mut self, source: &[u8]) -> Result<usize, RendererError>;
 }

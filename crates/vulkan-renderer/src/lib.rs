@@ -14,6 +14,7 @@ use window131::WindowDataGLFW;
 
 use crate::vulkan_init::SwapchainSupportDetails;
 
+pub mod build_tools;
 mod vulkan_init;
 
 #[derive(Error, Debug)]
@@ -154,4 +155,12 @@ impl VulkanRenderer {
     }
 }
 
-impl Renderer for VulkanRenderer {}
+impl Renderer for VulkanRenderer {
+    fn name(&self) -> &'static str {
+        "Vulkan"
+    }
+
+    fn create_shader(&mut self, source: &[u8]) -> Result<usize, RendererError> {
+        todo!()
+    }
+}
