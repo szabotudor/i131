@@ -11,6 +11,7 @@ pub enum RendererError {
     #[error("Error in renderer: {0}")]
     InstanceError(Box<dyn RendererInstanceError>),
 }
+unsafe impl Send for RendererError {}
 pub trait RendererInstanceError
 where
     Self: Debug + Display,

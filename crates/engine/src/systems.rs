@@ -9,6 +9,7 @@ use std::{
 };
 
 use crate::{EngineState, I131};
+use renderer131::RendererError;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -45,6 +46,9 @@ pub enum SystemError {
 
     #[error("System time error: {0}")]
     StstemTimeError(#[from] SystemTimeError),
+
+    #[error("Renderer error: {0}")]
+    RendererError(#[from] RendererError),
 }
 pub trait OptionSystemError<T> {
     fn ok_or_system_error(self, err: SystemError) -> Result<T, SystemError>;
