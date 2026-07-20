@@ -7,6 +7,8 @@ use engine131::{
 use thiserror::Error;
 use vulkan_renderer::{ValidationLevel, VulkanRenderer};
 
+use crate::shaders;
+
 #[derive(Error, Debug)]
 pub enum EditorError {
     #[error("Window error: {0}")]
@@ -19,6 +21,8 @@ pub enum EditorError {
 pub(crate) struct Editor {
     window: Window,
     renderer: Box<dyn Renderer>,
+    vert: usize,
+    frag: usize,
 }
 unsafe impl Send for Editor {}
 unsafe impl Sync for Editor {}
@@ -44,6 +48,8 @@ impl Editor {
         Ok(Self {
             window,
             renderer: Box::new(renderer),
+            vert: 0usize,
+            frag: 0usize,
         })
     }
 }
@@ -54,6 +60,13 @@ impl System for Editor {
         engine: &engine131::I131,
     ) -> Result<(), engine131::systems::SystemError> {
         let _ = engine;
+
+        let default_vert = self.renderer.create_shader(shaders::DEFAULT_VERT)?;
+        let default_frag = self.renderer.create_shader(shaders::DEFAULT_FRAG)?;
+
+        self.vert = default_vert;
+        self.frag = default_frag;
+
         Ok(())
     }
 

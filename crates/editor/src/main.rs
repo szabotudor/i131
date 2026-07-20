@@ -3,6 +3,7 @@ use engine131::{I131, schedulers::DAGScheduler};
 use crate::editor::Editor;
 
 mod editor;
+mod shaders;
 
 trait ResultPrint<T> {
     fn print(self) -> Result<T, i32>;

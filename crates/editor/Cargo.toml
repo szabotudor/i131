@@ -9,3 +9,7 @@ vulkan-renderer.workspace = true
 engine131.workspace = true
 
 thiserror.workspace = true
+
+[build-dependencies]
+renderer131.workspace = true
+vulkan-renderer.workspace = true

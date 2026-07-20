@@ -1,0 +1,6 @@
+[config]
+shaders_file = "src/shaders.rs"
+
+[shaders]
+"default.vert" = { backend = "Vulkan", stage = "Vertex", file = "src/shaders/default.vert" }
+"default.frag" = { backend = "Vulkan", stage = "Pixel", file = "src/shaders/default.frag" }
