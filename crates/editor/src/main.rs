@@ -1,9 +1,10 @@
-use engine131::{I131, schedulers::DAGScheduler};
+use engine131::{I131, renderer131::shaders_file, schedulers::DAGScheduler};
 
 use crate::editor::Editor;
 
 mod editor;
-mod shaders;
+// Include shaders from shaders.rs
+shaders_file!(shaders);
 
 trait ResultPrint<T> {
     fn print(self) -> Result<T, i32>;
@@ -21,6 +22,9 @@ impl<T, E: std::fmt::Display> ResultPrint<T> for Result<T, E> {
 }
 
 fn main() -> Result<(), i32> {
+    // TODO: File isn't used now, but if it's used in the future this line can be removed
+    let _ = shaders::SHADERS;
+
     let engine = I131::new(3, Box::new(DAGScheduler::new())).print()?;
     println!("Created engine");
 

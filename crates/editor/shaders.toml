@@ -1,5 +1,5 @@
 [config]
-shaders_file = "src/shaders.rs"
+always_rebuild = false
 
 [shaders]
 "default.vert" = { backend = "Vulkan", stage = "Vertex", file = "src/shaders/default.vert" }
