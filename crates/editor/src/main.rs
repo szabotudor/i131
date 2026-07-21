@@ -4,7 +4,7 @@ use crate::editor::Editor;
 
 mod editor;
 // Include shaders from shaders.rs
-shaders_file!(shaders);
+shaders_file!("Vulkan", shaders_vulkan);
 
 trait ResultPrint<T> {
     fn print(self) -> Result<T, i32>;
@@ -23,7 +23,7 @@ impl<T, E: std::fmt::Display> ResultPrint<T> for Result<T, E> {
 
 fn main() -> Result<(), i32> {
     // TODO: File isn't used now, but if it's used in the future this line can be removed
-    let _ = shaders::SHADERS;
+    let _ = shaders_vulkan::SHADERS;
 
     let engine = I131::new(3, Box::new(DAGScheduler::new())).print()?;
     println!("Created engine");

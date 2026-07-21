@@ -8,9 +8,14 @@ use thiserror::Error;
 
 #[macro_export]
 macro_rules! shaders_file {
-    ($as_mod:ident) => {
+    ($backend:literal, $as_mod:ident) => {
         mod $as_mod {
-            include!(concat!(env!("OUT_DIR"), "/shaders/shaders.rs"));
+            include!(concat!(
+                env!("OUT_DIR"),
+                "/",
+                $backend,
+                "/shaders/shaders.rs"
+            ));
         }
     };
 }
@@ -148,11 +153,10 @@ pub struct ShaderCrateMetadata {
 pub struct ShaderSource {
     source: Vec<u8>,
     stage: ShaderStage,
-    backend: String,
 }
 pub struct ShaderSources {
     config: ShaderBuilderConfig,
-    sources: HashMap<String, ShaderSource>,
+    backends: HashMap<String, HashMap<String, ShaderSource>>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -170,7 +174,7 @@ impl ShaderSources {
 
         if !metadata_file.exists() {
             return Ok(Self {
-                sources: HashMap::default(),
+                backends: HashMap::default(),
                 config: ShaderBuilderConfig::default(),
             });
         }
@@ -183,30 +187,30 @@ impl ShaderSources {
                 )
             })?)?;
 
-        let sources = metadata
-            .shaders
-            .into_iter()
-            .map(|(name, meta)| {
-                println!("cargo:rerun-if-changed={}", meta.file.display());
+        let backends = metadata.shaders.into_iter().try_fold(
+            HashMap::<String, HashMap<String, ShaderSource>>::default(),
+            |mut acc, (name, meta)| -> Result<_, ShaderBuilderError> {
+                let source = std::fs::read(&meta.file).map_err(|err| {
+                    ShaderBuilderError::from_io_error(
+                        err,
+                        format!("Couldn't read shader from file '{}'", meta.file.display()),
+                    )
+                })?;
 
-                Ok((
+                acc.entry(meta.backend).or_default().insert(
                     name,
                     ShaderSource {
-                        source: std::fs::read(&meta.file).map_err(|err| {
-                            ShaderBuilderError::from_io_error(
-                                err,
-                                format!("Couldn't read shader from file '{}'", meta.file.display()),
-                            )
-                        })?,
+                        source,
                         stage: meta.stage,
-                        backend: meta.backend,
                     },
-                ))
-            })
-            .collect::<Result<HashMap<String, ShaderSource>, ShaderBuilderError>>()?;
+                );
+
+                Ok(acc)
+            },
+        )?;
 
         Ok(Self {
-            sources,
+            backends,
             config: metadata.config,
         })
     }
@@ -220,8 +224,11 @@ pub trait ShaderCompiler {
     /// Will skip building if all shaders are already built
     ///
     /// `shaders`: Shaders read by the metadata reader
-    fn build_compatible_shaders(&self, shaders: ShaderSources) -> Result<(), ShaderBuilderError> {
-        if shaders.sources.is_empty() {
+    fn build_compatible_shaders(
+        &self,
+        mut shaders: ShaderSources,
+    ) -> Result<(), ShaderBuilderError> {
+        if shaders.backends.is_empty() {
             return Ok(());
         }
 
@@ -235,11 +242,16 @@ pub trait ShaderCompiler {
                 "Invalid OUT_DIR path: {}",
                 out_dir.display()
             )))?
-            .join(format!("shaders/{}", std::env::var("CARGO_PKG_NAME")?));
-        let lock_file = build_dir.join("shaders.lock");
-        let shaders_dir = build_dir;
-        let shaders_out_dir = out_dir.join("shaders");
+            .join(format!(
+                "shaders/{}/{backend_name}",
+                std::env::var("CARGO_PKG_NAME")?
+            ));
+        let out_dir = out_dir.join(backend_name);
 
+        let lock_file = build_dir.join("shaders.lock");
+
+        let shaders_out_dir = out_dir.join("shaders");
+        let shaders_dir = build_dir;
         let shaders_include_file = shaders_out_dir.join("shaders.rs");
 
         for dir in [&shaders_dir, &shaders_out_dir] {
@@ -261,14 +273,19 @@ pub trait ShaderCompiler {
             ShaderLockFile::default()
         };
 
+        let config = shaders.config;
+        let Some(shaders) = shaders.backends.remove(backend_name) else {
+            return Ok(());
+        };
+
         let mut all_bins = Vec::default();
         let mut bins = Vec::default();
 
-        for (name, source) in shaders.sources {
-            let file = shaders_dir.join(format!("{name}.{backend_name}"));
-            let out_file = shaders_out_dir.join(format!("{name}.{backend_name}"));
+        for (name, source) in shaders {
+            let file = shaders_dir.join(format!("{name}.bin"));
+            let out_file = shaders_out_dir.join(format!("{name}.bin"));
 
-            if !shaders.config.always_rebuild && out_file.exists() && file.exists() {
+            if !config.always_rebuild && out_file.exists() && file.exists() {
                 let mut hasher = DefaultHasher::new();
                 source.source.hash(&mut hasher);
                 let hash = hasher.finish();
@@ -281,14 +298,6 @@ pub trait ShaderCompiler {
                     continue;
                 }
                 shaders_lock.shaders.insert(name.clone(), hash);
-            }
-
-            if source.backend != backend_name {
-                if file.exists() {
-                    std::fs::copy(file, out_file.clone())?;
-                    all_bins.push((name, out_file));
-                }
-                continue;
             }
 
             let bin = self.build_shader(&name, source.stage, source.source)?;

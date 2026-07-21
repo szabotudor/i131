@@ -7,7 +7,7 @@ use engine131::{
 use thiserror::Error;
 use vulkan_renderer::{ValidationLevel, VulkanRenderer};
 
-use crate::shaders;
+use crate::shaders_vulkan;
 
 #[derive(Error, Debug)]
 pub enum EditorError {
@@ -61,8 +61,8 @@ impl System for Editor {
     ) -> Result<(), engine131::systems::SystemError> {
         let _ = engine;
 
-        let default_vert = self.renderer.create_shader(shaders::DEFAULT_VERT)?;
-        let default_frag = self.renderer.create_shader(shaders::DEFAULT_FRAG)?;
+        let default_vert = self.renderer.create_shader(shaders_vulkan::DEFAULT_VERT)?;
+        let default_frag = self.renderer.create_shader(shaders_vulkan::DEFAULT_FRAG)?;
 
         self.vert = default_vert;
         self.frag = default_frag;
