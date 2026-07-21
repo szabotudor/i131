@@ -222,9 +222,6 @@ pub trait ShaderCompiler {
     ///
     /// `shaders`: Shaders read by the metadata reader
     fn build_compatible_shaders(&self, shaders: ShaderSources) -> Result<(), ShaderBuilderError> {
-        let crate_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
-        let lock_file = crate_dir.join("shaders.lock");
-
         if shaders.sources.is_empty() {
             return Ok(());
         }
@@ -238,8 +235,10 @@ pub trait ShaderCompiler {
             .ok_or(ShaderBuilderError::CompilerError(format!(
                 "Invalid OUT_DIR path: {}",
                 out_dir.display()
-            )))?;
-        let shaders_dir = build_dir.join("shaders");
+            )))?
+            .join(format!("shaders/{}", std::env::var("CARGO_PKG_NAME")?));
+        let lock_file = build_dir.join("shaders.lock");
+        let shaders_dir = build_dir;
         let shaders_out_dir = out_dir.join("shaders");
 
         let shaders_include_file = shaders_out_dir.join("shaders.rs");
