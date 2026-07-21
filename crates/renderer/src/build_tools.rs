@@ -128,6 +128,10 @@ pub enum ShaderStage {
     Compute,
 }
 
+#[derive(Serialize, Deserialize, Default, Debug)]
+pub struct ShaderBuilderConfig {
+    always_rebuild: bool,
+}
 #[derive(Serialize, Deserialize)]
 pub struct ShaderMetadata {
     file: PathBuf,
@@ -135,20 +139,10 @@ pub struct ShaderMetadata {
     backend: String,
 }
 
-#[derive(Serialize, Deserialize, Default, Debug)]
-pub struct ShaderBuilderConfig {
-    always_rebuild: bool,
-}
-
 #[derive(Serialize, Deserialize)]
 pub struct ShaderCrateMetadata {
     config: ShaderBuilderConfig,
     shaders: HashMap<String, ShaderMetadata>,
-}
-
-#[derive(Serialize, Deserialize, Default)]
-pub struct ShaderLockFile {
-    shaders: HashMap<String, u64>,
 }
 
 pub struct ShaderSource {
@@ -159,6 +153,11 @@ pub struct ShaderSource {
 pub struct ShaderSources {
     config: ShaderBuilderConfig,
     sources: HashMap<String, ShaderSource>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+pub struct ShaderLockFile {
+    shaders: HashMap<String, u64>,
 }
 
 impl ShaderSources {
