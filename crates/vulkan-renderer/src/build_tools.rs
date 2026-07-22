@@ -1,6 +1,8 @@
+use renderer131::{
+    ShaderStage,
+    build_tools::{ShaderBuilderError, ShaderCompiler},
+};
 use std::{path::PathBuf, process::Command};
-
-use renderer131::build_tools::{ShaderBuilderError, ShaderCompiler};
 
 #[derive(Default)]
 pub struct VulkanShaderBuilder {}
@@ -13,16 +15,16 @@ impl ShaderCompiler for VulkanShaderBuilder {
     fn build_shader(
         &self,
         name: &str,
-        stage: renderer131::build_tools::ShaderStage,
+        stage: ShaderStage,
         source: Vec<u8>,
     ) -> Result<Vec<u8>, renderer131::build_tools::ShaderBuilderError> {
         let temp_folder = PathBuf::from(std::env::var("OUT_DIR")?).join("temp/");
         std::fs::create_dir_all(&temp_folder)?;
 
         let stage_name = match stage {
-            renderer131::build_tools::ShaderStage::Vertex => "vert",
-            renderer131::build_tools::ShaderStage::Pixel => "frag",
-            renderer131::build_tools::ShaderStage::Compute => todo!(),
+            ShaderStage::Vertex => "vert",
+            ShaderStage::Pixel => "frag",
+            ShaderStage::Compute => todo!(),
         };
 
         let temp_source_file = temp_folder.join(name);

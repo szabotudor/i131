@@ -3,8 +3,9 @@ use ash::{Device, Entry, Instance, LoadingError, vk};
 use raw_window_handle::HandleError;
 #[cfg(feature = "GLFW")]
 use renderer131::RendererError;
-use renderer131::{Renderer, RendererInstanceError};
+use renderer131::{Renderer, RendererInstanceError, ShaderCreateInfo, ShaderHandle};
 use std::{
+    collections::HashMap,
     ffi::{NulError, c_void},
     sync::{Arc, RwLock},
 };
@@ -15,6 +16,7 @@ use window131::WindowDataGLFW;
 use crate::vulkan_init::SwapchainSupportDetails;
 
 pub mod build_tools;
+mod vulkan_impl;
 mod vulkan_init;
 
 #[derive(Error, Debug)]
@@ -130,6 +132,11 @@ struct SwapchainData {
     swapchain_images: Vec<vk::Image>,
     swapchain_image_views: Vec<vk::ImageView>,
 }
+
+struct VulkanShaderData {
+    shader_module: vk::ShaderModule,
+}
+
 pub struct VulkanRenderer {
     _entry: Entry,
     instance: Instance,
@@ -139,6 +146,8 @@ pub struct VulkanRenderer {
     swapchain: SwapchainData,
     surface: vk::SurfaceKHR,
     debug_messenger: Option<DebugMessengerData>,
+
+    shaders: HashMap<ShaderHandle, VulkanShaderData>,
 }
 unsafe impl Send for VulkanRenderer {}
 unsafe impl Sync for VulkanRenderer {}
@@ -165,7 +174,11 @@ impl Renderer for VulkanRenderer {
         "Vulkan"
     }
 
-    fn create_shader(&mut self, source: &[u8]) -> Result<usize, RendererError> {
-        todo!()
+    fn create_shader(&mut self, source: ShaderCreateInfo) -> Result<ShaderHandle, RendererError> {
+        unsafe { Ok(self.create_shader_impl(source)?) }
+    }
+
+    fn destroy_shader(&mut self, shader: ShaderHandle) -> Result<(), RendererError> {
+        unsafe { Ok(self.destroy_shader_impl(shader)?) }
     }
 }

@@ -987,6 +987,8 @@ impl VulkanRenderer {
         enable_validation: ValidationLevel,
     ) -> Result<Self, VulkanRendererError> {
         unsafe {
+            use std::collections::HashMap;
+
             let required_extensions = window
                 .glfw
                 .get_required_instance_extensions()
@@ -1031,6 +1033,7 @@ impl VulkanRenderer {
                 swapchain,
                 surface,
                 debug_messenger,
+                shaders: HashMap::default(),
             })
         }
     }

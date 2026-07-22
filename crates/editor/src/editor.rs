@@ -1,6 +1,6 @@
 use engine131::{
     math131::Vec2u32,
-    renderer131::{Renderer, RendererError},
+    renderer131::{Renderer, RendererError, ShaderHandle},
     systems::{System, SystemId},
     window131::{Window, WindowError, WindowMode, WindowSettings},
 };
@@ -21,8 +21,8 @@ pub enum EditorError {
 pub(crate) struct Editor {
     window: Window,
     renderer: Box<dyn Renderer>,
-    vert: usize,
-    frag: usize,
+    vert: ShaderHandle,
+    frag: ShaderHandle,
 }
 unsafe impl Send for Editor {}
 unsafe impl Sync for Editor {}
@@ -48,8 +48,8 @@ impl Editor {
         Ok(Self {
             window,
             renderer: Box::new(renderer),
-            vert: 0usize,
-            frag: 0usize,
+            vert: ShaderHandle::null(),
+            frag: ShaderHandle::null(),
         })
     }
 }
@@ -120,6 +120,14 @@ impl System for Editor {
 
     fn destroy(&mut self, engine: &engine131::I131) -> Result<(), engine131::systems::SystemError> {
         let _ = engine;
+
+        if !self.vert.is_null() {
+            self.renderer.destroy_shader(self.vert)?;
+        }
+        if !self.frag.is_null() {
+            self.renderer.destroy_shader(self.frag)?;
+        }
+
         Ok(())
     }
 
