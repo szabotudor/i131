@@ -10,9 +10,11 @@ use ash::{
 };
 #[cfg(target_os = "linux")]
 use raw_window_handle::{WaylandDisplayHandle, WaylandWindowHandle};
+use raw_window_handle::{Win32WindowHandle, WindowsDisplayHandle};
 use std::{
-    ffi::{CStr, c_void},
+    ffi::{CStr, CString, c_void},
     ptr::{null, null_mut},
+    str::FromStr,
     sync::{Arc, RwLock},
 };
 use window131::WindowDataGLFW;
@@ -102,7 +104,7 @@ impl VulkanRenderer {
                 .map(|f| std::mem::transmute_copy(&f))
             else {
                 return Err(VulkanRendererError::MissingExtention(
-                    "vkCreateWaylandSurfaceKHR".to_string(),
+                    name.to_str().unwrap().to_string(),
                 ));
             };
 
@@ -112,15 +114,33 @@ impl VulkanRenderer {
     unsafe fn load_instance_extensions(
         entry: &Entry,
         instance: vk::Instance,
+        enable_validation: ValidationLevel,
     ) -> Result<InstanceExtensions, VulkanRendererError> {
         unsafe {
-            let create_debug_utils_messenger_ext =
-                Self::load_instance_proc_addr(entry, instance, c"vkCreateDebugUtilsMessengerEXT")?;
-            let destroy_debug_utils_messenger_ext =
-                Self::load_instance_proc_addr(entry, instance, c"vkDestroyDebugUtilsMessengerEXT")?;
+            let (create_debug_utils_messenger_ext, destroy_debug_utils_messenger_ext) =
+                if enable_validation != ValidationLevel::NoValidation {
+                    (
+                        Some(Self::load_instance_proc_addr(
+                            entry,
+                            instance,
+                            c"vkCreateDebugUtilsMessengerEXT",
+                        )?),
+                        Some(Self::load_instance_proc_addr(
+                            entry,
+                            instance,
+                            c"vkDestroyDebugUtilsMessengerEXT",
+                        )?),
+                    )
+                } else {
+                    (None, None)
+                };
 
+            #[cfg(target_os = "linux")]
             let create_wayland_surface_khr =
                 Self::load_instance_proc_addr(entry, instance, c"vkCreateWaylandSurfaceKHR")?;
+            #[cfg(target_os = "windows")]
+            let create_win32_surface_khr =
+                Self::load_instance_proc_addr(entry, instance, c"vkCreateWin32SurfaceKHR")?;
 
             let destroy_surface_khr =
                 Self::load_instance_proc_addr(entry, instance, c"vkDestroySurfaceKHR")?;
@@ -156,7 +176,12 @@ impl VulkanRenderer {
             Ok(InstanceExtensions {
                 create_debug_utils_messenger_ext,
                 destroy_debug_utils_messenger_ext,
+
+                #[cfg(target_os = "linux")]
                 create_wayland_surface_khr,
+                #[cfg(target_os = "windows")]
+                create_win32_surface_khr,
+
                 destroy_surface_khr,
                 get_physical_device_surface_support_khr,
                 get_physical_device_surface_capabilities_khr,
@@ -172,20 +197,21 @@ impl VulkanRenderer {
     unsafe fn create_instance(
         name: &str,
         app_version: (u32, u32, u32),
-        mut required_extensions: Vec<*const u8>,
+        mut required_extensions: Vec<*const i8>,
         enable_validation: ValidationLevel,
     ) -> Result<(Entry, Instance), VulkanRendererError> {
         unsafe {
+            let name_c_str = CString::from_str(name).unwrap();
             let app_info = vk::ApplicationInfo {
                 s_type: vk::ApplicationInfo::STRUCTURE_TYPE,
-                p_application_name: name as *const str as *const i8,
+                p_application_name: name_c_str.as_ptr(),
                 application_version: vk::make_api_version(
                     0,
                     app_version.0,
                     app_version.1,
                     app_version.2,
                 ),
-                p_engine_name: "I131" as *const str as *const i8,
+                p_engine_name: c"I131".as_ptr(),
                 engine_version: vk::make_api_version(
                     0,
                     app_version.0,
@@ -197,7 +223,7 @@ impl VulkanRenderer {
             };
 
             if enable_validation != ValidationLevel::NoValidation {
-                required_extensions.push(vk::EXT_DEBUG_UTILS_NAME.as_ptr() as *const u8);
+                required_extensions.push(vk::EXT_DEBUG_UTILS_NAME.as_ptr());
             }
             let entry = Entry::linked();
 
@@ -263,7 +289,9 @@ impl VulkanRenderer {
 
             let mut messenger = std::mem::MaybeUninit::<vk::DebugUtilsMessengerEXT>::uninit();
 
-            let res = (instance_extensions.create_debug_utils_messenger_ext)(
+            let res = (instance_extensions
+                .create_debug_utils_messenger_ext
+                .unwrap())(
                 vk_instance,
                 &debug_messanger_create_info as *const DebugUtilsMessengerCreateInfoEXT,
                 null(),
@@ -487,6 +515,44 @@ impl VulkanRenderer {
             Ok(surface.assume_init())
         }
     }
+    #[cfg(target_os = "windows")]
+    unsafe fn create_surface_win32(
+        instance: &Instance,
+        instance_extensions: &InstanceExtensions,
+        window: Win32WindowHandle,
+        #[expect(unused_variables, reason = "Display doesn't seem to be needed")]
+        display: WindowsDisplayHandle,
+    ) -> Result<vk::SurfaceKHR, VulkanRendererError> {
+        unsafe {
+            let create_info = vk::Win32SurfaceCreateInfoKHR {
+                s_type: vk::Win32SurfaceCreateInfoKHR::STRUCTURE_TYPE,
+                hinstance: window
+                    .hinstance
+                    .ok_or(VulkanRendererError::SurfaceCreateFailure(
+                        "Win32 HINSTANCE doesn't exist".to_string(),
+                    ))?
+                    .into(),
+                hwnd: window.hwnd.into(),
+                ..Default::default()
+            };
+
+            let mut surface = std::mem::MaybeUninit::<vk::SurfaceKHR>::uninit();
+
+            let res = (instance_extensions.create_win32_surface_khr)(
+                instance.handle(),
+                &create_info as *const _,
+                null(),
+                surface.as_mut_ptr(),
+            );
+            if res.result().is_err() {
+                return Err(VulkanRendererError::SurfaceCreateFailure(
+                    "Wayland".to_string(),
+                ));
+            }
+
+            Ok(surface.assume_init())
+        }
+    }
 
     #[cfg(feature = "GLFW")]
     unsafe fn create_surface_glfw(
@@ -520,9 +586,15 @@ impl VulkanRenderer {
                     todo!("Implement X11 surface creation for vulkan")
                 }
                 #[cfg(target_os = "windows")]
-                RawWindowHandle::Win32(_win32_window_handle) => {
-                    todo!("Implement Win32 surface creation for vulkan")
-                }
+                (
+                    RawWindowHandle::Win32(win32_window_handle),
+                    RawDisplayHandle::Windows(win32_display_handle),
+                ) => Self::create_surface_win32(
+                    instance,
+                    instance_extensions,
+                    win32_window_handle,
+                    win32_display_handle,
+                ),
 
                 other => Err(VulkanRendererError::UnknownGLFWError(format!(
                     "Vulkan surface creation not implemented for: {other:?}"
@@ -918,7 +990,10 @@ impl VulkanRenderer {
             let required_extensions = window
                 .glfw
                 .get_required_instance_extensions()
-                .ok_or_else(|| VulkanRendererError::GLFWInstanceError)?;
+                .ok_or_else(|| VulkanRendererError::GLFWInstanceError)?
+                .iter()
+                .map(|s| CString::from_str(&s))
+                .collect::<Result<Vec<_>, _>>()?;
             let required_extensions = required_extensions
                 .iter()
                 .map(|ext| ext.as_ptr())
@@ -927,7 +1002,8 @@ impl VulkanRenderer {
             let (entry, instance) =
                 Self::create_instance(name, app_version, required_extensions, enable_validation)?;
 
-            let instance_extensions = Self::load_instance_extensions(&entry, instance.handle())?;
+            let instance_extensions =
+                Self::load_instance_extensions(&entry, instance.handle(), enable_validation)?;
 
             let debug_messenger =
                 Self::create_debug_messenger(&instance, &instance_extensions, enable_validation)?;
@@ -964,11 +1040,15 @@ impl Drop for VulkanRenderer {
     fn drop(&mut self) {
         if let Some(messenger) = &mut self.debug_messenger {
             unsafe {
-                (self.instance_extensions.destroy_debug_utils_messenger_ext)(
-                    self.instance.handle(),
-                    messenger.messenger,
-                    null(),
-                )
+                if let Some(destroy_debug_utils_messenger_ext) =
+                    self.instance_extensions.destroy_debug_utils_messenger_ext
+                {
+                    (destroy_debug_utils_messenger_ext)(
+                        self.instance.handle(),
+                        messenger.messenger,
+                        null(),
+                    )
+                }
             }
 
             // This should drop the pointer kept by the messenger as p_user_data

@@ -5,7 +5,7 @@ use raw_window_handle::HandleError;
 use renderer131::RendererError;
 use renderer131::{Renderer, RendererInstanceError};
 use std::{
-    ffi::c_void,
+    ffi::{NulError, c_void},
     sync::{Arc, RwLock},
 };
 use thiserror::Error;
@@ -62,6 +62,9 @@ pub enum VulkanRendererError {
     #[error("Vulkan API error: {0}")]
     VulkanAPIError(#[from] vk::Result),
 
+    #[error("Nul Error: {0}")]
+    NulError(#[from] NulError),
+
     #[error("Vulkan Error: {0}")]
     VulkanError(String),
 }
@@ -102,10 +105,12 @@ struct DeviceQueues {
     present: Option<vk::Queue>,
 }
 struct InstanceExtensions {
-    create_debug_utils_messenger_ext: vk::PFN_vkCreateDebugUtilsMessengerEXT,
-    destroy_debug_utils_messenger_ext: vk::PFN_vkDestroyDebugUtilsMessengerEXT,
+    create_debug_utils_messenger_ext: Option<vk::PFN_vkCreateDebugUtilsMessengerEXT>,
+    destroy_debug_utils_messenger_ext: Option<vk::PFN_vkDestroyDebugUtilsMessengerEXT>,
     #[cfg(target_os = "linux")]
     create_wayland_surface_khr: vk::PFN_vkCreateWaylandSurfaceKHR,
+    #[cfg(target_os = "windows")]
+    create_win32_surface_khr: vk::PFN_vkCreateWin32SurfaceKHR,
     destroy_surface_khr: vk::PFN_vkDestroySurfaceKHR,
     get_physical_device_surface_support_khr: vk::PFN_vkGetPhysicalDeviceSurfaceSupportKHR,
     get_physical_device_surface_capabilities_khr: vk::PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR,
