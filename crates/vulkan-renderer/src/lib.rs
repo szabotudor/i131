@@ -3,7 +3,9 @@ use ash::{Device, Entry, Instance, LoadingError, vk};
 use raw_window_handle::HandleError;
 #[cfg(feature = "GLFW")]
 use renderer131::RendererError;
-use renderer131::{Renderer, RendererInstanceError, ShaderCreateInfo, ShaderHandle};
+use renderer131::{
+    OptionRendererError, Renderer, RendererInstanceError, ShaderCreateInfo, ShaderHandle,
+};
 use std::{
     collections::HashMap,
     ffi::{NulError, c_void},
@@ -128,6 +130,7 @@ struct SwapchainData {
     swapchain_details: SwapchainSupportDetails,
     swapchain: vk::SwapchainKHR,
     format: vk::SurfaceFormatKHR,
+    extent: vk::Extent2D,
     present_mode: vk::PresentModeKHR,
     swapchain_images: Vec<vk::Image>,
     swapchain_image_views: Vec<vk::ImageView>,
@@ -147,6 +150,7 @@ pub struct VulkanRenderer {
     surface: vk::SurfaceKHR,
     debug_messenger: Option<DebugMessengerData>,
 
+    pipeline_layout: vk::PipelineLayout,
     shaders: HashMap<ShaderHandle, VulkanShaderData>,
 }
 unsafe impl Send for VulkanRenderer {}
@@ -175,10 +179,24 @@ impl Renderer for VulkanRenderer {
     }
 
     fn create_shader(&mut self, source: ShaderCreateInfo) -> Result<ShaderHandle, RendererError> {
-        unsafe { Ok(self.create_shader_impl(source)?) }
+        let mut handles = unsafe { self.create_shaders_impl(&[source])? };
+        if handles.len() != 1 {
+            return Err(RendererError::APIError(
+                "Expected succesful shader creation to return one shader".to_string(),
+            ));
+        }
+        Ok(handles.pop().unwrap())
     }
-
+    fn create_shaders(
+        &mut self,
+        infos: &[ShaderCreateInfo],
+    ) -> Result<Vec<ShaderHandle>, RendererError> {
+        unsafe { Ok(self.create_shaders_impl(infos)?) }
+    }
     fn destroy_shader(&mut self, shader: ShaderHandle) -> Result<(), RendererError> {
-        unsafe { Ok(self.destroy_shader_impl(shader)?) }
+        unsafe { Ok(self.destroy_shaders_impl(&[shader])?) }
+    }
+    fn destroy_shaders(&mut self, shaders: &[ShaderHandle]) -> Result<(), RendererError> {
+        unsafe { Ok(self.destroy_shaders_impl(shaders)?) }
     }
 }

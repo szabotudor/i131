@@ -1,6 +1,6 @@
 use engine131::{
     math131::Vec2u32,
-    renderer131::{Renderer, RendererError, ShaderHandle},
+    renderer131::{Renderer, RendererError, ShaderCreateInfo, ShaderHandle, ShaderStage},
     systems::{System, SystemId},
     window131::{Window, WindowError, WindowMode, WindowSettings},
 };
@@ -61,8 +61,16 @@ impl System for Editor {
     ) -> Result<(), engine131::systems::SystemError> {
         let _ = engine;
 
-        let default_vert = self.renderer.create_shader(shaders_vulkan::DEFAULT_VERT)?;
-        let default_frag = self.renderer.create_shader(shaders_vulkan::DEFAULT_FRAG)?;
+        let default_vert = self.renderer.create_shader(ShaderCreateInfo {
+            source: shaders_vulkan::DEFAULT_VERT,
+            stage: ShaderStage::Vertex,
+            name: "default.vert".to_string(),
+        })?;
+        let default_frag = self.renderer.create_shader(ShaderCreateInfo {
+            source: shaders_vulkan::DEFAULT_FRAG,
+            stage: ShaderStage::Pixel,
+            name: "default.frag".to_string(),
+        })?;
 
         self.vert = default_vert;
         self.frag = default_frag;

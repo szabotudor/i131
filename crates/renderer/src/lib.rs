@@ -14,6 +14,9 @@ pub enum RendererError {
     #[error("Failed to initialize renderer: {0}")]
     InitError(String),
 
+    #[error("Error in renderer API usage: {0}")]
+    APIError(String),
+
     #[error("Error in renderer: {0}")]
     InstanceError(Box<dyn RendererInstanceError>),
 }
@@ -130,5 +133,10 @@ where
     fn name(&self) -> &'static str;
 
     fn create_shader(&mut self, info: ShaderCreateInfo) -> Result<ShaderHandle, RendererError>;
+    fn create_shaders(
+        &mut self,
+        infos: &[ShaderCreateInfo],
+    ) -> Result<Vec<ShaderHandle>, RendererError>;
     fn destroy_shader(&mut self, shader: ShaderHandle) -> Result<(), RendererError>;
+    fn destroy_shaders(&mut self, shaders: &[ShaderHandle]) -> Result<(), RendererError>;
 }

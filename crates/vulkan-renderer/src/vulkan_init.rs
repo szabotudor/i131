@@ -10,6 +10,7 @@ use ash::{
 };
 #[cfg(target_os = "linux")]
 use raw_window_handle::{WaylandDisplayHandle, WaylandWindowHandle};
+#[cfg(target_os = "windows")]
 use raw_window_handle::{Win32WindowHandle, WindowsDisplayHandle};
 use std::{
     ffi::{CStr, CString, c_void},
@@ -972,6 +973,7 @@ impl VulkanRenderer {
                 swapchain_details,
                 swapchain,
                 format,
+                extent,
                 present_mode,
                 swapchain_images,
                 swapchain_image_views,
@@ -1033,6 +1035,8 @@ impl VulkanRenderer {
                 swapchain,
                 surface,
                 debug_messenger,
+
+                pipeline_layout: vk::PipelineLayout::null(),
                 shaders: HashMap::default(),
             })
         }
@@ -1065,6 +1069,11 @@ impl Drop for VulkanRenderer {
         self.debug_messenger = None;
 
         unsafe {
+            if self.pipeline_layout != vk::PipelineLayout::null() {
+                self.device
+                    .destroy_pipeline_layout(self.pipeline_layout, None);
+            }
+
             for image_view in &self.swapchain.swapchain_image_views {
                 self.device.destroy_image_view(*image_view, None);
             }
