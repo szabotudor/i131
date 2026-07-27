@@ -211,6 +211,9 @@ impl Renderer for VulkanRenderer {
     fn create_program(&mut self, shaders: &[ShaderHandle]) -> Result<ProgramHandle, RendererError> {
         unsafe { Ok(self.create_program_impl(shaders)?) }
     }
+    fn destroy_program(&mut self, program: ProgramHandle) -> Result<(), RendererError> {
+        unsafe { Ok(self.destroy_program_impl(program)?) }
+    }
 
     fn execute(&mut self, program: ProgramHandle) -> Result<(), RendererError> {
         unsafe { Ok(self.execute_impl(program)?) }

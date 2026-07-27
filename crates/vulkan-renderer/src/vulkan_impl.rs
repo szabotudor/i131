@@ -340,6 +340,24 @@ impl VulkanRenderer {
 
         Ok(ProgramHandle::from_raw(pipeline_hash))
     }
+    pub(crate) unsafe fn destroy_program_impl(
+        &mut self,
+        program: ProgramHandle,
+    ) -> Result<(), VulkanRendererError> {
+        let prog = self.pipelines.get(&program.as_raw()).ok_or_else(|| {
+            VulkanRendererError::VulkanError(format!("Program {program:?} doesn't exist"))
+        })?;
+
+        unsafe {
+            self.device.destroy_pipeline(prog.pipeline, None);
+            self.device.destroy_pipeline_layout(prog.layout, None);
+            self.device.destroy_render_pass(prog.render_pass, None);
+        }
+
+        self.pipelines.remove(&program.as_raw());
+
+        Ok(())
+    }
 
     pub(crate) unsafe fn execute_impl(
         &mut self,

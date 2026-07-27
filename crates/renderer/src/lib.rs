@@ -147,6 +147,7 @@ where
     fn destroy_shaders(&mut self, shaders: &[ShaderHandle]) -> Result<(), RendererError>;
 
     fn create_program(&mut self, shaders: &[ShaderHandle]) -> Result<ProgramHandle, RendererError>;
+    fn destroy_program(&mut self, program: ProgramHandle) -> Result<(), RendererError>;
 
     fn execute(&mut self, program: ProgramHandle) -> Result<(), RendererError>;
 }
