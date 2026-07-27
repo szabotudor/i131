@@ -1,6 +1,8 @@
 use engine131::{
     math131::Vec2u32,
-    renderer131::{Renderer, RendererError, ShaderCreateInfo, ShaderHandle, ShaderStage},
+    renderer131::{
+        ProgramHandle, Renderer, RendererError, ShaderCreateInfo, ShaderHandle, ShaderStage,
+    },
     systems::{System, SystemId},
     window131::{Window, WindowError, WindowMode, WindowSettings},
 };
@@ -23,6 +25,7 @@ pub(crate) struct Editor {
     renderer: Box<dyn Renderer>,
     vert: ShaderHandle,
     frag: ShaderHandle,
+    prog: ProgramHandle,
 }
 unsafe impl Send for Editor {}
 unsafe impl Sync for Editor {}
@@ -50,6 +53,7 @@ impl Editor {
             renderer: Box::new(renderer),
             vert: ShaderHandle::null(),
             frag: ShaderHandle::null(),
+            prog: ProgramHandle::null(),
         })
     }
 }
@@ -75,6 +79,12 @@ impl System for Editor {
         self.vert = default_vert;
         self.frag = default_frag;
 
+        let default_prog = self
+            .renderer
+            .create_program(&[default_vert, default_frag])?;
+
+        self.prog = default_prog;
+
         Ok(())
     }
 
@@ -92,6 +102,8 @@ impl System for Editor {
         delta: f32,
     ) -> Result<(), engine131::systems::SystemError> {
         let _ = (engine, delta);
+
+        self.renderer.execute(self.prog)?;
 
         self.window.update();
 

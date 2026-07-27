@@ -1036,7 +1036,8 @@ impl VulkanRenderer {
                 surface,
                 debug_messenger,
 
-                pipeline_layout: vk::PipelineLayout::null(),
+                pipelines: HashMap::default(),
+                shader_handles: 0usize,
                 shaders: HashMap::default(),
             })
         }
@@ -1069,10 +1070,12 @@ impl Drop for VulkanRenderer {
         self.debug_messenger = None;
 
         unsafe {
-            if self.pipeline_layout != vk::PipelineLayout::null() {
-                self.device
-                    .destroy_pipeline_layout(self.pipeline_layout, None);
+            for (_handle, pipeline) in &self.pipelines {
+                self.device.destroy_pipeline(pipeline.pipeline, None);
+                self.device.destroy_pipeline_layout(pipeline.layout, None);
+                self.device.destroy_render_pass(pipeline.render_pass, None);
             }
+            self.pipelines.clear();
 
             for image_view in &self.swapchain.swapchain_image_views {
                 self.device.destroy_image_view(*image_view, None);

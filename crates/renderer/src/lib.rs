@@ -49,8 +49,7 @@ impl<T> OptionRendererError<T> for Option<T> {
 }
 
 pub struct Handle<Marker> {
-    raw: u32,
-    generation: u32,
+    raw: usize,
     _marker: PhantomData<Marker>,
 }
 trait HandleName {
@@ -61,7 +60,6 @@ impl<T> Clone for Handle<T> {
     fn clone(&self) -> Self {
         Self {
             raw: self.raw.clone(),
-            generation: self.generation.clone(),
             _marker: Default::default(),
         }
     }
@@ -69,7 +67,7 @@ impl<T> Clone for Handle<T> {
 impl<T> Copy for Handle<T> {}
 impl<T> PartialEq for Handle<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.raw == other.raw && self.generation == other.generation
+        self.raw == other.raw
     }
 }
 impl<T> Eq for Handle<T> {}
@@ -77,8 +75,7 @@ impl<T> Eq for Handle<T> {}
 impl<T> Handle<T> {
     pub fn null() -> Self {
         Self {
-            raw: std::u32::MAX,
-            generation: std::u32::MAX,
+            raw: std::usize::MAX,
             _marker: Default::default(),
         }
     }
@@ -86,12 +83,21 @@ impl<T> Handle<T> {
     pub fn is_null(&self) -> bool {
         self.eq(&Self::null())
     }
+
+    pub fn from_raw(raw: usize) -> Self {
+        Self {
+            raw,
+            _marker: Default::default(),
+        }
+    }
+    pub fn as_raw(&self) -> usize {
+        self.raw
+    }
 }
 
 impl<T> Hash for Handle<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.raw.hash(state);
-        self.generation.hash(state);
     }
 }
 impl<T> Debug for Handle<T>
@@ -99,17 +105,11 @@ where
     T: HandleName,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Handle<{}>({:#x}:{:#x})",
-            T::NAME,
-            self.raw,
-            self.generation
-        )
+        write!(f, "Handle<{}>({:#x})", T::NAME, self.raw,)
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 pub enum ShaderStage {
     Vertex,
     Pixel,
@@ -126,6 +126,12 @@ impl HandleName for ShaderHandleMarker {
 }
 pub type ShaderHandle = Handle<ShaderHandleMarker>;
 
+pub struct ProgramHandleMarker;
+impl HandleName for ProgramHandleMarker {
+    const NAME: &'static str = "ShaderProgram";
+}
+pub type ProgramHandle = Handle<ProgramHandleMarker>;
+
 pub trait Renderer
 where
     Self: Send + Sync,
@@ -139,4 +145,8 @@ where
     ) -> Result<Vec<ShaderHandle>, RendererError>;
     fn destroy_shader(&mut self, shader: ShaderHandle) -> Result<(), RendererError>;
     fn destroy_shaders(&mut self, shaders: &[ShaderHandle]) -> Result<(), RendererError>;
+
+    fn create_program(&mut self, shaders: &[ShaderHandle]) -> Result<ProgramHandle, RendererError>;
+
+    fn execute(&mut self, program: ProgramHandle) -> Result<(), RendererError>;
 }

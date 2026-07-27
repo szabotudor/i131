@@ -4,11 +4,11 @@ use raw_window_handle::HandleError;
 #[cfg(feature = "GLFW")]
 use renderer131::RendererError;
 use renderer131::{
-    OptionRendererError, Renderer, RendererInstanceError, ShaderCreateInfo, ShaderHandle,
+    ProgramHandle, Renderer, RendererInstanceError, ShaderCreateInfo, ShaderHandle, ShaderStage,
 };
 use std::{
     collections::HashMap,
-    ffi::{NulError, c_void},
+    ffi::{CString, NulError, c_void},
     sync::{Arc, RwLock},
 };
 use thiserror::Error;
@@ -138,6 +138,13 @@ struct SwapchainData {
 
 struct VulkanShaderData {
     shader_module: vk::ShaderModule,
+    stage: ShaderStage,
+    name: CString,
+}
+struct VulkanPipelineData {
+    pipeline: vk::Pipeline,
+    layout: vk::PipelineLayout,
+    render_pass: vk::RenderPass,
 }
 
 pub struct VulkanRenderer {
@@ -150,7 +157,8 @@ pub struct VulkanRenderer {
     surface: vk::SurfaceKHR,
     debug_messenger: Option<DebugMessengerData>,
 
-    pipeline_layout: vk::PipelineLayout,
+    pipelines: HashMap<usize, VulkanPipelineData>,
+    shader_handles: usize,
     shaders: HashMap<ShaderHandle, VulkanShaderData>,
 }
 unsafe impl Send for VulkanRenderer {}
@@ -198,5 +206,13 @@ impl Renderer for VulkanRenderer {
     }
     fn destroy_shaders(&mut self, shaders: &[ShaderHandle]) -> Result<(), RendererError> {
         unsafe { Ok(self.destroy_shaders_impl(shaders)?) }
+    }
+
+    fn create_program(&mut self, shaders: &[ShaderHandle]) -> Result<ProgramHandle, RendererError> {
+        unsafe { Ok(self.create_program_impl(shaders)?) }
+    }
+
+    fn execute(&mut self, program: ProgramHandle) -> Result<(), RendererError> {
+        unsafe { Ok(self.execute_impl(program)?) }
     }
 }

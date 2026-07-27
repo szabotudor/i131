@@ -1,12 +1,46 @@
-use std::{ffi::CString, ptr::null, str::FromStr};
+use std::{
+    ffi::CString,
+    hash::{DefaultHasher, Hash, Hasher},
+    ptr::null,
+    str::FromStr,
+};
 
 use ash::vk::{self, TaggedStructure};
-use renderer131::{ShaderCreateInfo, ShaderHandle};
+use renderer131::{ProgramHandle, ShaderCreateInfo, ShaderHandle};
 
-use crate::{VulkanRenderer, VulkanRendererError};
+use crate::{VulkanPipelineData, VulkanRenderer, VulkanRendererError, VulkanShaderData};
 
 impl VulkanRenderer {
-    unsafe fn create_pipeline_and_dynamic_state(&mut self) -> Result<(), VulkanRendererError> {
+    fn pipeline_hash(&self, shaders: &[ShaderHandle]) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        for shader in shaders {
+            shader.hash(&mut hasher);
+        }
+        let hash = hasher.finish();
+
+        hash
+    }
+
+    unsafe fn get_or_create_pipeline(
+        &mut self,
+        shaders: &[ShaderHandle],
+    ) -> Result<usize, VulkanRendererError> {
+        let hash = self.pipeline_hash(shaders) as usize;
+
+        if self.pipelines.contains_key(&hash) {
+            return Ok(hash);
+        }
+
+        let pipeline = unsafe { self.create_pipeline_and_dynamic_state(shaders)? };
+        self.pipelines.insert(hash, pipeline);
+
+        Ok(hash)
+    }
+
+    unsafe fn create_pipeline_and_dynamic_state(
+        &mut self,
+        shaders: &[ShaderHandle],
+    ) -> Result<VulkanPipelineData, VulkanRendererError> {
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
 
         let dynamic_state_create_info = vk::PipelineDynamicStateCreateInfo {
@@ -118,7 +152,117 @@ impl VulkanRenderer {
                 .create_pipeline_layout(&pipeline_layout_create_info, None)
         }?;
 
-        todo!()
+        let shader_stages = shaders
+            .iter()
+            .map(|shader| {
+                let info = self
+                    .shaders
+                    .get(shader)
+                    .ok_or(VulkanRendererError::VulkanError(format!(
+                        "Shader {shader:?} doesn't exist"
+                    )))?;
+                let shader_stage_create_info = vk::PipelineShaderStageCreateInfo {
+                    s_type: vk::PipelineShaderStageCreateInfo::STRUCTURE_TYPE,
+                    stage: match info.stage {
+                        renderer131::ShaderStage::Vertex => vk::ShaderStageFlags::VERTEX,
+                        renderer131::ShaderStage::Pixel => vk::ShaderStageFlags::FRAGMENT,
+                        renderer131::ShaderStage::Compute => vk::ShaderStageFlags::COMPUTE,
+                    },
+                    module: info.shader_module,
+                    p_name: c"main".as_ptr(),
+                    ..Default::default()
+                };
+
+                Ok(shader_stage_create_info)
+            })
+            .collect::<Result<Vec<_>, VulkanRendererError>>()?;
+
+        let render_pass = self.create_render_pass()?;
+        // Create pipeline after pipeline layout
+        let pipeline_create_info = vk::GraphicsPipelineCreateInfo {
+            s_type: vk::GraphicsPipelineCreateInfo::STRUCTURE_TYPE,
+            stage_count: shader_stages.len() as u32,
+            p_stages: shader_stages.as_ptr(),
+
+            p_vertex_input_state: &vertex_input_create_info
+                as *const vk::PipelineVertexInputStateCreateInfo,
+            p_input_assembly_state: &input_assembly_create_info
+                as *const vk::PipelineInputAssemblyStateCreateInfo,
+            p_viewport_state: &viewport_state_create_info
+                as *const vk::PipelineViewportStateCreateInfo,
+            p_rasterization_state: &rasterizer_create_info
+                as *const vk::PipelineRasterizationStateCreateInfo,
+            p_multisample_state: &multisampling_create_info
+                as *const vk::PipelineMultisampleStateCreateInfo,
+            p_depth_stencil_state: null(),
+            p_color_blend_state: &color_blending_create_info
+                as *const vk::PipelineColorBlendStateCreateInfo,
+            p_dynamic_state: &dynamic_state_create_info
+                as *const vk::PipelineDynamicStateCreateInfo,
+            layout: pipeline_layout,
+            render_pass,
+            // Which subpass of the render pass to use
+            subpass: 0,
+            base_pipeline_handle: vk::Pipeline::null(),
+            base_pipeline_index: -1,
+            ..Default::default()
+        };
+
+        let pipeline = *unsafe {
+            self.device
+                .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_create_info], None)
+                .map_err(|(_, err)| err)?
+        }
+        .first()
+        .unwrap();
+
+        Ok(VulkanPipelineData {
+            pipeline,
+            layout: pipeline_layout,
+            render_pass,
+        })
+    }
+
+    fn create_render_pass(&mut self) -> Result<vk::RenderPass, VulkanRendererError> {
+        let color_attachment = vk::AttachmentDescription {
+            format: self.swapchain.format.format,
+            samples: vk::SampleCountFlags::TYPE_1,
+            load_op: vk::AttachmentLoadOp::CLEAR,
+            store_op: vk::AttachmentStoreOp::STORE,
+            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
+            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+            initial_layout: vk::ImageLayout::UNDEFINED,
+            final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+            ..Default::default()
+        };
+
+        let color_attachment_ref = vk::AttachmentReference {
+            attachment: 0,
+            layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+        };
+
+        let subpass = vk::SubpassDescription {
+            pipeline_bind_point: vk::PipelineBindPoint::GRAPHICS,
+            color_attachment_count: 1,
+            p_color_attachments: &color_attachment_ref as *const vk::AttachmentReference,
+            ..Default::default()
+        };
+
+        let render_pass_create_info = vk::RenderPassCreateInfo {
+            s_type: vk::RenderPassCreateInfo::STRUCTURE_TYPE,
+            attachment_count: 1,
+            p_attachments: &color_attachment as *const vk::AttachmentDescription,
+            subpass_count: 1,
+            p_subpasses: &subpass as *const vk::SubpassDescription,
+            ..Default::default()
+        };
+
+        let render_pass = unsafe {
+            self.device
+                .create_render_pass(&render_pass_create_info, None)
+        }?;
+
+        Ok(render_pass)
     }
 
     pub(crate) unsafe fn create_shaders_impl(
@@ -126,7 +270,7 @@ impl VulkanRenderer {
         infos: &[ShaderCreateInfo],
     ) -> Result<Vec<ShaderHandle>, VulkanRendererError> {
         unsafe {
-            let shader_modules = infos
+            let shader_handles = infos
                 .iter()
                 .map(|info| {
                     let shader_module_create_info = vk::ShaderModuleCreateInfo {
@@ -139,30 +283,23 @@ impl VulkanRenderer {
                     let shader_module = self
                         .device
                         .create_shader_module(&shader_module_create_info, None)?;
-                    Ok((shader_module, CString::from_str(&info.name)?, info))
-                })
-                .collect::<Result<Vec<_>, VulkanRendererError>>()?;
 
-            let shaders = shader_modules
-                .iter()
-                .map(|(shader_module, name, info)| {
-                    let shader_stage_create_info = vk::PipelineShaderStageCreateInfo {
-                        s_type: vk::PipelineShaderStageCreateInfo::STRUCTURE_TYPE,
-                        stage: match info.stage {
-                            renderer131::ShaderStage::Vertex => vk::ShaderStageFlags::VERTEX,
-                            renderer131::ShaderStage::Pixel => vk::ShaderStageFlags::FRAGMENT,
-                            renderer131::ShaderStage::Compute => vk::ShaderStageFlags::COMPUTE,
+                    let shader_handle = self.shader_handles;
+                    self.shaders.insert(
+                        ShaderHandle::from_raw(shader_handle),
+                        VulkanShaderData {
+                            shader_module,
+                            stage: info.stage,
+                            name: CString::from_str(&info.name)?,
                         },
-                        module: *shader_module,
-                        p_name: name.as_ptr(),
-                        ..Default::default()
-                    };
-                    Ok(shader_stage_create_info)
+                    );
+                    self.shader_handles += 1;
+
+                    Ok(ShaderHandle::from_raw(shader_handle))
                 })
                 .collect::<Result<Vec<_>, VulkanRendererError>>()?;
 
-            self.create_pipeline_and_dynamic_state()?;
-            todo!()
+            Ok(shader_handles)
         }
     }
 
@@ -171,9 +308,43 @@ impl VulkanRenderer {
         shaders: &[ShaderHandle],
     ) -> Result<(), VulkanRendererError> {
         unsafe {
-            self.device.destroy_shader_module(todo!(), None);
+            let shader_metas = shaders
+                .iter()
+                .map(|handle| {
+                    self.shaders.get(handle).ok_or_else(|| {
+                        VulkanRendererError::VulkanError(format!(
+                            "Shader {handle:?} doesn't exist."
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<&VulkanShaderData>, VulkanRendererError>>()?;
+
+            for shader in shader_metas {
+                self.device
+                    .destroy_shader_module(shader.shader_module, None);
+            }
+
+            for shader in shaders {
+                self.shaders.remove(shader);
+            }
 
             Ok(())
         }
+    }
+
+    pub(crate) unsafe fn create_program_impl(
+        &mut self,
+        shaders: &[ShaderHandle],
+    ) -> Result<ProgramHandle, VulkanRendererError> {
+        let pipeline_hash = unsafe { self.get_or_create_pipeline(shaders) }?;
+
+        Ok(ProgramHandle::from_raw(pipeline_hash))
+    }
+
+    pub(crate) unsafe fn execute_impl(
+        &mut self,
+        program: ProgramHandle,
+    ) -> Result<(), VulkanRendererError> {
+        todo!()
     }
 }
