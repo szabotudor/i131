@@ -1,7 +1,7 @@
 #[cfg(feature = "GLFW")]
 use crate::SwapchainData;
 use crate::{
-    DebugMessengerData, DebugMessengerUserData, DeviceQueues, InstanceExtensions,
+    CommandPools, DebugMessengerData, DebugMessengerUserData, DeviceQueues, InstanceExtensions,
     QueueFamilyIndices, ValidationLevel, VulkanRenderer, VulkanRendererError,
 };
 use ash::{
@@ -13,6 +13,7 @@ use raw_window_handle::{WaylandDisplayHandle, WaylandWindowHandle};
 #[cfg(target_os = "windows")]
 use raw_window_handle::{Win32WindowHandle, WindowsDisplayHandle};
 use std::{
+    collections::HashMap,
     ffi::{CStr, CString, c_void},
     ptr::{null, null_mut},
     str::FromStr,
@@ -174,6 +175,11 @@ impl VulkanRenderer {
             let get_swapchain_images_khr =
                 Self::load_instance_proc_addr(entry, instance, c"vkGetSwapchainImagesKHR")?;
 
+            let acquire_next_image_khr =
+                Self::load_instance_proc_addr(entry, instance, c"vkAcquireNextImageKHR")?;
+            let queue_present_khr =
+                Self::load_instance_proc_addr(entry, instance, c"vkQueuePresentKHR")?;
+
             Ok(InstanceExtensions {
                 create_debug_utils_messenger_ext,
                 destroy_debug_utils_messenger_ext,
@@ -191,6 +197,9 @@ impl VulkanRenderer {
                 create_swapchain_khr,
                 destroy_swapchain_khr,
                 get_swapchain_images_khr,
+
+                acquire_next_image_khr,
+                queue_present_khr,
             })
         }
     }
@@ -604,6 +613,28 @@ impl VulkanRenderer {
         }
     }
 
+    unsafe fn create_command_pools(
+        device: &Device,
+        queue_family_indices: &QueueFamilyIndices,
+    ) -> Result<CommandPools, VulkanRendererError> {
+        unsafe {
+            let graphics_command_pool_create_info = vk::CommandPoolCreateInfo {
+                s_type: vk::CommandPoolCreateInfo::STRUCTURE_TYPE,
+                flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+                queue_family_index: queue_family_indices.graphics.ok_or_else(|| {
+                    VulkanRendererError::VulkanError(format!("Graphics queue family doesn't exist"))
+                })?,
+                ..Default::default()
+            };
+            let graphics_command_pool =
+                device.create_command_pool(&graphics_command_pool_create_info, None)?;
+
+            Ok(CommandPools {
+                graphics: graphics_command_pool,
+            })
+        }
+    }
+
     unsafe fn create_device(
         instance: &Instance,
         instance_extensions: &InstanceExtensions,
@@ -614,6 +645,8 @@ impl VulkanRenderer {
             Device,
             QueueFamilyIndices,
             DeviceQueues,
+            CommandPools,
+            HashMap<vk::CommandPool, Vec<vk::CommandBuffer>>,
             SwapchainSupportDetails,
         ),
         VulkanRendererError,
@@ -742,11 +775,28 @@ impl VulkanRenderer {
                         .map(|idx| device.get_device_queue(idx, 0)),
                 };
 
+                let command_pools = Self::create_command_pools(&device, &queue_family_indices)?;
+
+                let command_buffer_alloc_info = vk::CommandBufferAllocateInfo {
+                    s_type: vk::CommandBufferAllocateInfo::STRUCTURE_TYPE,
+                    command_pool: command_pools.graphics,
+                    level: vk::CommandBufferLevel::PRIMARY,
+                    command_buffer_count: 1,
+                    ..Default::default()
+                };
+                let mut command_buffers = HashMap::default();
+                command_buffers.insert(
+                    command_pools.graphics,
+                    device.allocate_command_buffers(&command_buffer_alloc_info)?,
+                );
+
                 Ok((
                     physical_device,
                     device,
                     queue_family_indices,
                     device_queues,
+                    command_pools,
+                    command_buffers,
                     swapchain_details,
                 ))
             } else {
@@ -1016,8 +1066,15 @@ impl VulkanRenderer {
 
             let surface = Self::create_surface_glfw(&instance, &instance_extensions, window)?;
 
-            let (_physical_device, device, queue_family_indices, device_queues, swapchain_details) =
-                Self::create_device(&instance, &instance_extensions, surface)?;
+            let (
+                _physical_device,
+                device,
+                queue_family_indices,
+                device_queues,
+                command_pools,
+                command_buffers,
+                swapchain_details,
+            ) = Self::create_device(&instance, &instance_extensions, surface)?;
 
             let swapchain = Self::create_swapchain_glfw(
                 &instance_extensions,
@@ -1028,12 +1085,31 @@ impl VulkanRenderer {
                 window,
             )?;
 
+            let semaphore_create_info = vk::SemaphoreCreateInfo {
+                s_type: vk::SemaphoreCreateInfo::STRUCTURE_TYPE,
+                ..Default::default()
+            };
+            let fence_create_info = vk::FenceCreateInfo {
+                s_type: vk::FenceCreateInfo::STRUCTURE_TYPE,
+                flags: vk::FenceCreateFlags::SIGNALED,
+                ..Default::default()
+            };
+
+            let image_available_semaphore =
+                device.create_semaphore(&semaphore_create_info, None)?;
+            let render_finished_semaphore =
+                device.create_semaphore(&semaphore_create_info, None)?;
+
+            let in_flight_fence = device.create_fence(&fence_create_info, None)?;
+
             Ok(Self {
                 _entry: entry,
                 instance,
                 instance_extensions,
                 device,
                 device_queues,
+                command_pools,
+                command_buffers,
                 swapchain,
                 surface,
                 debug_messenger,
@@ -1045,6 +1121,10 @@ impl VulkanRenderer {
                 shader_handles: 0usize,
                 shaders: HashMap::default(),
                 settings: Settings::default(),
+
+                image_available_semaphore,
+                render_finished_semaphore,
+                in_flight_fence,
             })
         }
     }
@@ -1052,6 +1132,11 @@ impl VulkanRenderer {
 
 impl Drop for VulkanRenderer {
     fn drop(&mut self) {
+        match unsafe { self.device.device_wait_idle() } {
+            Ok(_) => {}
+            Err(err) => panic!("{err:?}"),
+        }
+
         if let Some(messenger) = &mut self.debug_messenger {
             unsafe {
                 if let Some(destroy_debug_utils_messenger_ext) =
@@ -1099,6 +1184,16 @@ impl Drop for VulkanRenderer {
                 self.device.destroy_image_view(*image_view, None);
             }
             self.swapchain.swapchain_image_views.clear();
+
+            self.device
+                .destroy_command_pool(self.command_pools.graphics, None);
+            self.command_buffers.clear();
+
+            self.device
+                .destroy_semaphore(self.image_available_semaphore, None);
+            self.device
+                .destroy_semaphore(self.render_finished_semaphore, None);
+            self.device.destroy_fence(self.in_flight_fence, None);
 
             (self.instance_extensions.destroy_swapchain_khr)(
                 self.device.handle(),

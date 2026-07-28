@@ -1,3 +1,4 @@
+use math131::Vec4f32;
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::{Debug, Display},
@@ -132,8 +133,10 @@ impl HandleName for ProgramHandleMarker {
 }
 pub type ProgramHandle = Handle<ProgramHandleMarker>;
 
-#[derive(Default, Serialize, Deserialize, Clone, Debug, Hash)]
-pub struct Settings {}
+#[derive(Default, Clone, Debug)]
+pub struct Settings {
+    pub clear_color: Vec4f32,
+}
 
 pub trait Renderer
 where

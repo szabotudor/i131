@@ -1,7 +1,7 @@
 use std::{
     ffi::CString,
     hash::{DefaultHasher, Hash, Hasher},
-    ptr::null,
+    ptr::{null, null_mut},
     str::FromStr,
 };
 
@@ -11,6 +11,12 @@ use renderer131::{ProgramHandle, Settings, ShaderCreateInfo, ShaderHandle};
 use crate::{VulkanPipelineData, VulkanRenderer, VulkanRendererError, VulkanShaderData};
 
 impl VulkanRenderer {
+    fn settings_hash(settings: &Settings) -> usize {
+        let mut hasher = DefaultHasher::new();
+        let hash = hasher.finish();
+
+        hash as usize
+    }
     fn shaders_hash(shaders: &[ShaderHandle]) -> usize {
         let mut hasher = DefaultHasher::new();
         for shader in shaders {
@@ -25,7 +31,7 @@ impl VulkanRenderer {
 
         let shader_hash = Self::shaders_hash(shaders);
         shader_hash.hash(&mut hasher);
-        settings.hash(&mut hasher);
+        Self::settings_hash(settings).hash(&mut hasher);
 
         let hash = hasher.finish();
 
@@ -269,12 +275,24 @@ impl VulkanRenderer {
             ..Default::default()
         };
 
+        let dependency = vk::SubpassDependency {
+            src_subpass: vk::SUBPASS_EXTERNAL,
+            dst_subpass: 0,
+            src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            src_access_mask: vk::AccessFlags::NONE,
+            dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            ..Default::default()
+        };
+
         let render_pass_create_info = vk::RenderPassCreateInfo {
             s_type: vk::RenderPassCreateInfo::STRUCTURE_TYPE,
             attachment_count: 1,
             p_attachments: &color_attachment as *const vk::AttachmentDescription,
             subpass_count: 1,
             p_subpasses: &subpass as *const vk::SubpassDescription,
+            dependency_count: 1,
+            p_dependencies: &dependency as *const vk::SubpassDependency,
             ..Default::default()
         };
 
@@ -422,14 +440,174 @@ impl VulkanRenderer {
         Ok(())
     }
 
+    unsafe fn record_command_buffer(
+        &mut self,
+        program: ProgramHandle,
+        image_index: usize,
+    ) -> Result<vk::CommandBuffer, VulkanRendererError> {
+        unsafe {
+            let pipeline = self.get_or_create_pipeline(program)?;
+            let pipeline = self.pipelines.get(&pipeline).ok_or_else(|| {
+                VulkanRendererError::VulkanError(format!(
+                    "Pipeline doesn't exist for program {program:?}"
+                ))
+            })?;
+
+            let command_buffers = self
+                .command_buffers
+                .get(&self.command_pools.graphics)
+                .ok_or_else(|| {
+                    VulkanRendererError::VulkanError(
+                        "Graphics command pool doesn't have any command buffers".to_string(),
+                    )
+                })?;
+            let command_buffer = *command_buffers.first().ok_or_else(|| {
+                VulkanRendererError::VulkanError(
+                    "Expected command pool to have at least one command buffer".to_string(),
+                )
+            })?;
+
+            self.device.reset_command_buffer(
+                command_buffer,
+                vk::CommandBufferResetFlags::RELEASE_RESOURCES,
+            )?;
+
+            let command_buffer_begin_info = vk::CommandBufferBeginInfo {
+                s_type: vk::CommandBufferBeginInfo::STRUCTURE_TYPE,
+                flags: vk::CommandBufferUsageFlags::from_raw(0),
+                p_inheritance_info: null(),
+                ..Default::default()
+            };
+            self.device
+                .begin_command_buffer(command_buffer, &command_buffer_begin_info)?;
+
+            // TODO: Image index
+            let clear_value = vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [
+                        self.settings.clear_color.x,
+                        self.settings.clear_color.y,
+                        self.settings.clear_color.z,
+                        self.settings.clear_color.w,
+                    ],
+                },
+            };
+            let render_pass_begin_info = vk::RenderPassBeginInfo {
+                s_type: vk::RenderPassBeginInfo::STRUCTURE_TYPE,
+                render_pass: self.render_pass,
+                framebuffer: self.swapchain_framebuffers[image_index],
+                render_area: vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent: self.swapchain.extent,
+                },
+                clear_value_count: 1,
+                p_clear_values: &clear_value as *const vk::ClearValue,
+                ..Default::default()
+            };
+
+            self.device.cmd_begin_render_pass(
+                command_buffer,
+                &render_pass_begin_info,
+                vk::SubpassContents::INLINE,
+            );
+
+            self.device.cmd_bind_pipeline(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                pipeline.pipeline,
+            );
+
+            let viewport = vk::Viewport {
+                x: 0.0f32,
+                y: 0.0f32,
+                width: self.swapchain.extent.width as f32,
+                height: self.swapchain.extent.height as f32,
+                min_depth: 0.0f32,
+                max_depth: 0.0f32,
+            };
+            self.device.cmd_set_viewport(command_buffer, 0, &[viewport]);
+
+            let scissor = vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: self.swapchain.extent,
+            };
+            self.device.cmd_set_scissor(command_buffer, 0, &[scissor]);
+
+            self.device.cmd_draw(command_buffer, 3, 1, 0, 0);
+            // TODO: Draw commands
+
+            self.device.cmd_end_render_pass(command_buffer);
+            self.device.end_command_buffer(command_buffer)?;
+
+            Ok(command_buffer)
+        }
+    }
+
     pub(crate) unsafe fn execute_impl(
         &mut self,
         program: ProgramHandle,
     ) -> Result<(), VulkanRendererError> {
         unsafe {
-            let pipeline = self.get_or_create_pipeline(program)?;
+            self.device.device_wait_idle()?;
 
-            todo!()
+            self.device
+                .wait_for_fences(&[self.in_flight_fence], true, std::u64::MAX)?;
+            self.device.reset_fences(&[self.in_flight_fence])?;
+
+            let mut image_index = 0u32;
+            (self.instance_extensions.acquire_next_image_khr)(
+                self.device.handle(),
+                self.swapchain.swapchain,
+                std::u64::MAX,
+                self.image_available_semaphore,
+                vk::Fence::null(),
+                &mut image_index as *mut u32,
+            )
+            .result()?;
+
+            let command_buffer = self.record_command_buffer(program, image_index as usize)?;
+
+            let wait_semaphores = [self.image_available_semaphore];
+            let signal_semaphores = [self.render_finished_semaphore];
+            let wait_stage = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+
+            let submit_info = vk::SubmitInfo {
+                s_type: vk::SubmitInfo::STRUCTURE_TYPE,
+                wait_semaphore_count: 1,
+                p_wait_semaphores: wait_semaphores.as_ptr(),
+                p_wait_dst_stage_mask: wait_stage.as_ptr(),
+                command_buffer_count: 1,
+                p_command_buffers: &command_buffer as *const vk::CommandBuffer,
+                signal_semaphore_count: 1,
+                p_signal_semaphores: signal_semaphores.as_ptr(),
+                ..Default::default()
+            };
+
+            self.device.queue_submit(
+                // By now this should already be verified to exist
+                self.device_queues.graphics.unwrap(),
+                &[submit_info],
+                self.in_flight_fence,
+            )?;
+
+            let present_info = vk::PresentInfoKHR {
+                s_type: vk::PresentInfoKHR::STRUCTURE_TYPE,
+                wait_semaphore_count: 1,
+                p_wait_semaphores: signal_semaphores.as_ptr(),
+                swapchain_count: 1,
+                p_swapchains: [self.swapchain.swapchain].as_ptr(),
+                p_image_indices: &image_index as *const u32,
+                p_results: null_mut(),
+                ..Default::default()
+            };
+
+            (self.instance_extensions.queue_present_khr)(
+                self.device_queues.present.unwrap(),
+                &present_info as *const vk::PresentInfoKHR,
+            )
+            .result()?;
+
+            Ok(())
         }
     }
 }

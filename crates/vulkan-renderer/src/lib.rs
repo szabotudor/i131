@@ -109,6 +109,9 @@ struct DeviceQueues {
     graphics: Option<vk::Queue>,
     present: Option<vk::Queue>,
 }
+struct CommandPools {
+    graphics: vk::CommandPool,
+}
 struct InstanceExtensions {
     create_debug_utils_messenger_ext: Option<vk::PFN_vkCreateDebugUtilsMessengerEXT>,
     destroy_debug_utils_messenger_ext: Option<vk::PFN_vkDestroyDebugUtilsMessengerEXT>,
@@ -125,6 +128,9 @@ struct InstanceExtensions {
     create_swapchain_khr: vk::PFN_vkCreateSwapchainKHR,
     destroy_swapchain_khr: vk::PFN_vkDestroySwapchainKHR,
     get_swapchain_images_khr: vk::PFN_vkGetSwapchainImagesKHR,
+
+    acquire_next_image_khr: vk::PFN_vkAcquireNextImageKHR,
+    queue_present_khr: vk::PFN_vkQueuePresentKHR,
 }
 #[derive(Default)]
 struct SwapchainData {
@@ -153,6 +159,8 @@ pub struct VulkanRenderer {
     instance_extensions: InstanceExtensions,
     device: Device,
     device_queues: DeviceQueues,
+    command_pools: CommandPools,
+    command_buffers: HashMap<vk::CommandPool, Vec<vk::CommandBuffer>>,
     swapchain: SwapchainData,
     surface: vk::SurfaceKHR,
     debug_messenger: Option<DebugMessengerData>,
@@ -166,6 +174,10 @@ pub struct VulkanRenderer {
     shader_handles: usize,
     shaders: HashMap<ShaderHandle, VulkanShaderData>,
     settings: Settings,
+
+    image_available_semaphore: vk::Semaphore,
+    render_finished_semaphore: vk::Semaphore,
+    in_flight_fence: vk::Fence,
 }
 unsafe impl Send for VulkanRenderer {}
 unsafe impl Sync for VulkanRenderer {}
