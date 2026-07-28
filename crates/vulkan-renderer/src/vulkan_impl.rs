@@ -595,7 +595,7 @@ impl VulkanRenderer {
                 wait_semaphore_count: 1,
                 p_wait_semaphores: signal_semaphores.as_ptr(),
                 swapchain_count: 1,
-                p_swapchains: [self.swapchain.swapchain].as_ptr(),
+                p_swapchains: &self.swapchain.swapchain as *const vk::SwapchainKHR,
                 p_image_indices: &image_index as *const u32,
                 p_results: null_mut(),
                 ..Default::default()

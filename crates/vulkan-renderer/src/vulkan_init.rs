@@ -1161,11 +1161,28 @@ impl Drop for VulkanRenderer {
         self.debug_messenger = None;
 
         unsafe {
+            self.device
+                .destroy_semaphore(self.image_available_semaphore, None);
+            self.device
+                .destroy_semaphore(self.render_finished_semaphore, None);
+            self.device.destroy_fence(self.in_flight_fence, None);
+
+            self.device
+                .destroy_command_pool(self.command_pools.graphics, None);
+            self.command_buffers.clear();
+
+            for framebuffer in &self.swapchain_framebuffers {
+                self.device.destroy_framebuffer(*framebuffer, None);
+            }
+
             for (_handle, pipeline) in &self.pipelines {
                 self.device.destroy_pipeline(pipeline.pipeline, None);
                 self.device.destroy_pipeline_layout(pipeline.layout, None);
             }
             self.pipelines.clear();
+
+            self.device.destroy_render_pass(self.render_pass, None);
+            self.render_pass = vk::RenderPass::null();
 
             for (_, shader) in &self.shaders {
                 self.device
@@ -1173,27 +1190,10 @@ impl Drop for VulkanRenderer {
             }
             self.shaders.clear();
 
-            for framebuffer in &self.swapchain_framebuffers {
-                self.device.destroy_framebuffer(*framebuffer, None);
-            }
-
-            self.device.destroy_render_pass(self.render_pass, None);
-            self.render_pass = vk::RenderPass::null();
-
             for image_view in &self.swapchain.swapchain_image_views {
                 self.device.destroy_image_view(*image_view, None);
             }
             self.swapchain.swapchain_image_views.clear();
-
-            self.device
-                .destroy_command_pool(self.command_pools.graphics, None);
-            self.command_buffers.clear();
-
-            self.device
-                .destroy_semaphore(self.image_available_semaphore, None);
-            self.device
-                .destroy_semaphore(self.render_finished_semaphore, None);
-            self.device.destroy_fence(self.in_flight_fence, None);
 
             (self.instance_extensions.destroy_swapchain_khr)(
                 self.device.handle(),
