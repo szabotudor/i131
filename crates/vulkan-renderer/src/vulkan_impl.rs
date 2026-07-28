@@ -6,32 +6,50 @@ use std::{
 };
 
 use ash::vk::{self, TaggedStructure};
-use renderer131::{ProgramHandle, ShaderCreateInfo, ShaderHandle};
+use renderer131::{ProgramHandle, Settings, ShaderCreateInfo, ShaderHandle};
 
 use crate::{VulkanPipelineData, VulkanRenderer, VulkanRendererError, VulkanShaderData};
 
 impl VulkanRenderer {
-    fn pipeline_hash(&self, shaders: &[ShaderHandle]) -> u64 {
+    fn shaders_hash(shaders: &[ShaderHandle]) -> usize {
         let mut hasher = DefaultHasher::new();
         for shader in shaders {
             shader.hash(&mut hasher);
         }
         let hash = hasher.finish();
 
-        hash
+        hash as usize
+    }
+    fn pipeline_hash(shaders: &[ShaderHandle], settings: &Settings) -> usize {
+        let mut hasher = DefaultHasher::new();
+
+        let shader_hash = Self::shaders_hash(shaders);
+        shader_hash.hash(&mut hasher);
+        settings.hash(&mut hasher);
+
+        let hash = hasher.finish();
+
+        hash as usize
     }
 
     unsafe fn get_or_create_pipeline(
         &mut self,
-        shaders: &[ShaderHandle],
+        program: ProgramHandle,
     ) -> Result<usize, VulkanRendererError> {
-        let hash = self.pipeline_hash(shaders) as usize;
+        let (shaders, pipelines) = self.programs.get_mut(&program).ok_or_else(|| {
+            VulkanRendererError::VulkanError(format!("Program {program:?} doesn't exist"))
+        })?;
+
+        let hash = Self::pipeline_hash(shaders, &self.settings);
 
         if self.pipelines.contains_key(&hash) {
             return Ok(hash);
         }
 
-        let pipeline = unsafe { self.create_pipeline_and_dynamic_state(shaders)? };
+        let shaders = shaders.clone();
+
+        pipelines.push(hash);
+        let pipeline = unsafe { self.create_pipeline_and_dynamic_state(&shaders)? };
         self.pipelines.insert(hash, pipeline);
 
         Ok(hash)
@@ -177,7 +195,7 @@ impl VulkanRenderer {
             })
             .collect::<Result<Vec<_>, VulkanRendererError>>()?;
 
-        let render_pass = self.create_render_pass()?;
+        let render_pass = self.get_or_create_render_pass()?;
         // Create pipeline after pipeline layout
         let pipeline_create_info = vk::GraphicsPipelineCreateInfo {
             s_type: vk::GraphicsPipelineCreateInfo::STRUCTURE_TYPE,
@@ -219,11 +237,14 @@ impl VulkanRenderer {
         Ok(VulkanPipelineData {
             pipeline,
             layout: pipeline_layout,
-            render_pass,
         })
     }
 
-    fn create_render_pass(&mut self) -> Result<vk::RenderPass, VulkanRendererError> {
+    fn get_or_create_render_pass(&mut self) -> Result<vk::RenderPass, VulkanRendererError> {
+        if self.render_pass != vk::RenderPass::null() {
+            return Ok(self.render_pass);
+        }
+
         let color_attachment = vk::AttachmentDescription {
             format: self.swapchain.format.format,
             samples: vk::SampleCountFlags::TYPE_1,
@@ -261,6 +282,35 @@ impl VulkanRenderer {
             self.device
                 .create_render_pass(&render_pass_create_info, None)
         }?;
+
+        let swapchain_framebuffers = self
+            .swapchain
+            .swapchain_image_views
+            .iter()
+            .map(|image_view| {
+                let attachments = [*image_view];
+
+                let framebuffer_create_info = vk::FramebufferCreateInfo {
+                    s_type: vk::FramebufferCreateInfo::STRUCTURE_TYPE,
+                    render_pass,
+                    attachment_count: 1,
+                    p_attachments: attachments.as_ptr(),
+                    width: self.swapchain.extent.width,
+                    height: self.swapchain.extent.height,
+                    layers: 1,
+                    ..Default::default()
+                };
+
+                let framebuffer = unsafe {
+                    self.device
+                        .create_framebuffer(&framebuffer_create_info, None)
+                }?;
+                Ok(framebuffer)
+            })
+            .collect::<Result<Vec<_>, VulkanRendererError>>()?;
+
+        self.render_pass = render_pass;
+        self.swapchain_framebuffers = swapchain_framebuffers;
 
         Ok(render_pass)
     }
@@ -336,25 +386,38 @@ impl VulkanRenderer {
         &mut self,
         shaders: &[ShaderHandle],
     ) -> Result<ProgramHandle, VulkanRendererError> {
-        let pipeline_hash = unsafe { self.get_or_create_pipeline(shaders) }?;
+        let program = ProgramHandle::from_raw(Self::shaders_hash(shaders));
+        if self.programs.contains_key(&program) {
+            return Err(VulkanRendererError::VulkanError(format!(
+                "Program {program:?} already exists"
+            )));
+        }
+        self.programs
+            .insert(program, (shaders.to_vec(), Vec::default()));
 
-        Ok(ProgramHandle::from_raw(pipeline_hash))
+        Ok(program)
     }
     pub(crate) unsafe fn destroy_program_impl(
         &mut self,
         program: ProgramHandle,
     ) -> Result<(), VulkanRendererError> {
-        let prog = self.pipelines.get(&program.as_raw()).ok_or_else(|| {
+        let (_shaders, pipelines) = self.programs.get(&program).ok_or_else(|| {
             VulkanRendererError::VulkanError(format!("Program {program:?} doesn't exist"))
         })?;
 
         unsafe {
-            self.device.destroy_pipeline(prog.pipeline, None);
-            self.device.destroy_pipeline_layout(prog.layout, None);
-            self.device.destroy_render_pass(prog.render_pass, None);
-        }
+            for pipeline_id in pipelines {
+                let pipeline = self.pipelines.get(pipeline_id).ok_or_else(|| {
+                    VulkanRendererError::VulkanError(format!(
+                        "Pipeline {pipeline_id}, referenced by program {program:?} doesn't exist"
+                    ))
+                })?;
 
-        self.pipelines.remove(&program.as_raw());
+                self.device.destroy_pipeline(pipeline.pipeline, None);
+                self.device.destroy_pipeline_layout(pipeline.layout, None);
+                self.pipelines.remove(pipeline_id);
+            }
+        }
 
         Ok(())
     }
@@ -363,6 +426,10 @@ impl VulkanRenderer {
         &mut self,
         program: ProgramHandle,
     ) -> Result<(), VulkanRendererError> {
-        todo!()
+        unsafe {
+            let pipeline = self.get_or_create_pipeline(program)?;
+
+            todo!()
+        }
     }
 }

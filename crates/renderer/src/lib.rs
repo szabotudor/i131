@@ -132,6 +132,9 @@ impl HandleName for ProgramHandleMarker {
 }
 pub type ProgramHandle = Handle<ProgramHandleMarker>;
 
+#[derive(Default, Serialize, Deserialize, Clone, Debug, Hash)]
+pub struct Settings {}
+
 pub trait Renderer
 where
     Self: Send + Sync,

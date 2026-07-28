@@ -991,6 +991,8 @@ impl VulkanRenderer {
         unsafe {
             use std::collections::HashMap;
 
+            use renderer131::Settings;
+
             let required_extensions = window
                 .glfw
                 .get_required_instance_extensions()
@@ -1036,9 +1038,13 @@ impl VulkanRenderer {
                 surface,
                 debug_messenger,
 
+                programs: HashMap::default(),
                 pipelines: HashMap::default(),
+                render_pass: vk::RenderPass::null(),
+                swapchain_framebuffers: Vec::default(),
                 shader_handles: 0usize,
                 shaders: HashMap::default(),
+                settings: Settings::default(),
             })
         }
     }
@@ -1073,9 +1079,21 @@ impl Drop for VulkanRenderer {
             for (_handle, pipeline) in &self.pipelines {
                 self.device.destroy_pipeline(pipeline.pipeline, None);
                 self.device.destroy_pipeline_layout(pipeline.layout, None);
-                self.device.destroy_render_pass(pipeline.render_pass, None);
             }
             self.pipelines.clear();
+
+            for (_, shader) in &self.shaders {
+                self.device
+                    .destroy_shader_module(shader.shader_module, None);
+            }
+            self.shaders.clear();
+
+            for framebuffer in &self.swapchain_framebuffers {
+                self.device.destroy_framebuffer(*framebuffer, None);
+            }
+
+            self.device.destroy_render_pass(self.render_pass, None);
+            self.render_pass = vk::RenderPass::null();
 
             for image_view in &self.swapchain.swapchain_image_views {
                 self.device.destroy_image_view(*image_view, None);

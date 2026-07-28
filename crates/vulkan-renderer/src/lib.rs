@@ -4,7 +4,8 @@ use raw_window_handle::HandleError;
 #[cfg(feature = "GLFW")]
 use renderer131::RendererError;
 use renderer131::{
-    ProgramHandle, Renderer, RendererInstanceError, ShaderCreateInfo, ShaderHandle, ShaderStage,
+    ProgramHandle, Renderer, RendererInstanceError, Settings, ShaderCreateInfo, ShaderHandle,
+    ShaderStage,
 };
 use std::{
     collections::HashMap,
@@ -144,7 +145,6 @@ struct VulkanShaderData {
 struct VulkanPipelineData {
     pipeline: vk::Pipeline,
     layout: vk::PipelineLayout,
-    render_pass: vk::RenderPass,
 }
 
 pub struct VulkanRenderer {
@@ -157,9 +157,15 @@ pub struct VulkanRenderer {
     surface: vk::SurfaceKHR,
     debug_messenger: Option<DebugMessengerData>,
 
+    /// Map of Program( `Hash<shaders>` ) to associated Pipelines( `[Hash<shaders+settings>]` )
+    /// Each program can have multiple pipelines
+    programs: HashMap<ProgramHandle, (Vec<ShaderHandle>, Vec<usize>)>,
     pipelines: HashMap<usize, VulkanPipelineData>,
+    render_pass: vk::RenderPass,
+    swapchain_framebuffers: Vec<vk::Framebuffer>,
     shader_handles: usize,
     shaders: HashMap<ShaderHandle, VulkanShaderData>,
+    settings: Settings,
 }
 unsafe impl Send for VulkanRenderer {}
 unsafe impl Sync for VulkanRenderer {}
