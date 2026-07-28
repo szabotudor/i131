@@ -1,6 +1,8 @@
 use engine131::{
     math131::Vec2u32,
-    renderer131::{Renderer, RendererError},
+    renderer131::{
+        ProgramHandle, Renderer, RendererError, ShaderCreateInfo, ShaderHandle, ShaderStage,
+    },
     systems::{System, SystemId},
     window131::{Window, WindowError, WindowMode, WindowSettings},
 };
@@ -21,8 +23,9 @@ pub enum EditorError {
 pub(crate) struct Editor {
     window: Window,
     renderer: Box<dyn Renderer>,
-    vert: usize,
-    frag: usize,
+    vert: ShaderHandle,
+    frag: ShaderHandle,
+    prog: ProgramHandle,
 }
 unsafe impl Send for Editor {}
 unsafe impl Sync for Editor {}
@@ -48,8 +51,9 @@ impl Editor {
         Ok(Self {
             window,
             renderer: Box::new(renderer),
-            vert: 0usize,
-            frag: 0usize,
+            vert: ShaderHandle::null(),
+            frag: ShaderHandle::null(),
+            prog: ProgramHandle::null(),
         })
     }
 }
@@ -61,11 +65,25 @@ impl System for Editor {
     ) -> Result<(), engine131::systems::SystemError> {
         let _ = engine;
 
-        let default_vert = self.renderer.create_shader(shaders_vulkan::DEFAULT_VERT)?;
-        let default_frag = self.renderer.create_shader(shaders_vulkan::DEFAULT_FRAG)?;
+        let default_vert = self.renderer.create_shader(ShaderCreateInfo {
+            source: shaders_vulkan::DEFAULT_VERT,
+            stage: ShaderStage::Vertex,
+            name: "default.vert".to_string(),
+        })?;
+        let default_frag = self.renderer.create_shader(ShaderCreateInfo {
+            source: shaders_vulkan::DEFAULT_FRAG,
+            stage: ShaderStage::Pixel,
+            name: "default.frag".to_string(),
+        })?;
 
         self.vert = default_vert;
         self.frag = default_frag;
+
+        let default_prog = self
+            .renderer
+            .create_program(&[default_vert, default_frag])?;
+
+        self.prog = default_prog;
 
         Ok(())
     }
@@ -84,6 +102,8 @@ impl System for Editor {
         delta: f32,
     ) -> Result<(), engine131::systems::SystemError> {
         let _ = (engine, delta);
+
+        self.renderer.execute(self.prog)?;
 
         self.window.update();
 
@@ -120,6 +140,14 @@ impl System for Editor {
 
     fn destroy(&mut self, engine: &engine131::I131) -> Result<(), engine131::systems::SystemError> {
         let _ = engine;
+
+        if !self.vert.is_null() {
+            self.renderer.destroy_shader(self.vert)?;
+        }
+        if !self.frag.is_null() {
+            self.renderer.destroy_shader(self.frag)?;
+        }
+
         Ok(())
     }
 

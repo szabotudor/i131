@@ -1,3 +1,4 @@
+use crate::ShaderStage;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -124,13 +125,6 @@ impl ShaderBuilderError {
     fn from_io_error(err: std::io::Error, context: String) -> Self {
         Self::IOError(err, context)
     }
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub enum ShaderStage {
-    Vertex,
-    Pixel,
-    Compute,
 }
 
 #[derive(Serialize, Deserialize, Default, Debug)]

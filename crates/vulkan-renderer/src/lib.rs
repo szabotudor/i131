@@ -3,9 +3,12 @@ use ash::{Device, Entry, Instance, LoadingError, vk};
 use raw_window_handle::HandleError;
 #[cfg(feature = "GLFW")]
 use renderer131::RendererError;
-use renderer131::{Renderer, RendererInstanceError};
+use renderer131::{
+    ProgramHandle, Renderer, RendererInstanceError, ShaderCreateInfo, ShaderHandle, ShaderStage,
+};
 use std::{
-    ffi::{NulError, c_void},
+    collections::HashMap,
+    ffi::{CString, NulError, c_void},
     sync::{Arc, RwLock},
 };
 use thiserror::Error;
@@ -15,6 +18,7 @@ use window131::WindowDataGLFW;
 use crate::vulkan_init::SwapchainSupportDetails;
 
 pub mod build_tools;
+mod vulkan_impl;
 mod vulkan_init;
 
 #[derive(Error, Debug)]
@@ -126,10 +130,23 @@ struct SwapchainData {
     swapchain_details: SwapchainSupportDetails,
     swapchain: vk::SwapchainKHR,
     format: vk::SurfaceFormatKHR,
+    extent: vk::Extent2D,
     present_mode: vk::PresentModeKHR,
     swapchain_images: Vec<vk::Image>,
     swapchain_image_views: Vec<vk::ImageView>,
 }
+
+struct VulkanShaderData {
+    shader_module: vk::ShaderModule,
+    stage: ShaderStage,
+    name: CString,
+}
+struct VulkanPipelineData {
+    pipeline: vk::Pipeline,
+    layout: vk::PipelineLayout,
+    render_pass: vk::RenderPass,
+}
+
 pub struct VulkanRenderer {
     _entry: Entry,
     instance: Instance,
@@ -139,6 +156,10 @@ pub struct VulkanRenderer {
     swapchain: SwapchainData,
     surface: vk::SurfaceKHR,
     debug_messenger: Option<DebugMessengerData>,
+
+    pipelines: HashMap<usize, VulkanPipelineData>,
+    shader_handles: usize,
+    shaders: HashMap<ShaderHandle, VulkanShaderData>,
 }
 unsafe impl Send for VulkanRenderer {}
 unsafe impl Sync for VulkanRenderer {}
@@ -165,7 +186,36 @@ impl Renderer for VulkanRenderer {
         "Vulkan"
     }
 
-    fn create_shader(&mut self, source: &[u8]) -> Result<usize, RendererError> {
-        todo!()
+    fn create_shader(&mut self, source: ShaderCreateInfo) -> Result<ShaderHandle, RendererError> {
+        let mut handles = unsafe { self.create_shaders_impl(&[source])? };
+        if handles.len() != 1 {
+            return Err(RendererError::APIError(
+                "Expected succesful shader creation to return one shader".to_string(),
+            ));
+        }
+        Ok(handles.pop().unwrap())
+    }
+    fn create_shaders(
+        &mut self,
+        infos: &[ShaderCreateInfo],
+    ) -> Result<Vec<ShaderHandle>, RendererError> {
+        unsafe { Ok(self.create_shaders_impl(infos)?) }
+    }
+    fn destroy_shader(&mut self, shader: ShaderHandle) -> Result<(), RendererError> {
+        unsafe { Ok(self.destroy_shaders_impl(&[shader])?) }
+    }
+    fn destroy_shaders(&mut self, shaders: &[ShaderHandle]) -> Result<(), RendererError> {
+        unsafe { Ok(self.destroy_shaders_impl(shaders)?) }
+    }
+
+    fn create_program(&mut self, shaders: &[ShaderHandle]) -> Result<ProgramHandle, RendererError> {
+        unsafe { Ok(self.create_program_impl(shaders)?) }
+    }
+    fn destroy_program(&mut self, program: ProgramHandle) -> Result<(), RendererError> {
+        unsafe { Ok(self.destroy_program_impl(program)?) }
+    }
+
+    fn execute(&mut self, program: ProgramHandle) -> Result<(), RendererError> {
+        unsafe { Ok(self.execute_impl(program)?) }
     }
 }

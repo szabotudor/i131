@@ -1,0 +1,368 @@
+use std::{
+    ffi::CString,
+    hash::{DefaultHasher, Hash, Hasher},
+    ptr::null,
+    str::FromStr,
+};
+
+use ash::vk::{self, TaggedStructure};
+use renderer131::{ProgramHandle, ShaderCreateInfo, ShaderHandle};
+
+use crate::{VulkanPipelineData, VulkanRenderer, VulkanRendererError, VulkanShaderData};
+
+impl VulkanRenderer {
+    fn pipeline_hash(&self, shaders: &[ShaderHandle]) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        for shader in shaders {
+            shader.hash(&mut hasher);
+        }
+        let hash = hasher.finish();
+
+        hash
+    }
+
+    unsafe fn get_or_create_pipeline(
+        &mut self,
+        shaders: &[ShaderHandle],
+    ) -> Result<usize, VulkanRendererError> {
+        let hash = self.pipeline_hash(shaders) as usize;
+
+        if self.pipelines.contains_key(&hash) {
+            return Ok(hash);
+        }
+
+        let pipeline = unsafe { self.create_pipeline_and_dynamic_state(shaders)? };
+        self.pipelines.insert(hash, pipeline);
+
+        Ok(hash)
+    }
+
+    unsafe fn create_pipeline_and_dynamic_state(
+        &mut self,
+        shaders: &[ShaderHandle],
+    ) -> Result<VulkanPipelineData, VulkanRendererError> {
+        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+
+        let dynamic_state_create_info = vk::PipelineDynamicStateCreateInfo {
+            s_type: vk::PipelineDynamicStateCreateInfo::STRUCTURE_TYPE,
+            dynamic_state_count: dynamic_states.len() as u32,
+            p_dynamic_states: dynamic_states.as_ptr(),
+            ..Default::default()
+        };
+
+        let vertex_input_create_info = vk::PipelineVertexInputStateCreateInfo {
+            s_type: vk::PipelineVertexInputStateCreateInfo::STRUCTURE_TYPE,
+            vertex_binding_description_count: 0,
+            p_vertex_binding_descriptions: null(),
+            vertex_attribute_description_count: 0,
+            p_vertex_attribute_descriptions: null(),
+            ..Default::default()
+        };
+
+        let input_assembly_create_info = vk::PipelineInputAssemblyStateCreateInfo {
+            s_type: vk::PipelineInputAssemblyStateCreateInfo::STRUCTURE_TYPE,
+            topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+            primitive_restart_enable: vk::FALSE,
+            ..Default::default()
+        };
+
+        let viewport = vk::Viewport {
+            x: 0.0f32,
+            y: 0.0f32,
+            width: self.swapchain.extent.width as f32,
+            height: self.swapchain.extent.height as f32,
+            min_depth: 0.0f32,
+            max_depth: 1.0f32,
+        };
+
+        let scissor = vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: self.swapchain.extent,
+        };
+
+        let viewport_state_create_info = vk::PipelineViewportStateCreateInfo {
+            s_type: vk::PipelineViewportStateCreateInfo::STRUCTURE_TYPE,
+            viewport_count: 1,
+            p_viewports: &viewport as *const vk::Viewport,
+            scissor_count: 1,
+            p_scissors: &scissor as *const vk::Rect2D,
+            ..Default::default()
+        };
+
+        let rasterizer_create_info = vk::PipelineRasterizationStateCreateInfo {
+            s_type: vk::PipelineRasterizationStateCreateInfo::STRUCTURE_TYPE,
+            depth_clamp_enable: vk::FALSE,
+            rasterizer_discard_enable: vk::FALSE,
+            polygon_mode: vk::PolygonMode::FILL,
+            line_width: 1.0f32,
+            cull_mode: vk::CullModeFlags::BACK,
+            front_face: vk::FrontFace::CLOCKWISE,
+            depth_bias_enable: vk::FALSE,
+            depth_bias_constant_factor: 0.0f32,
+            depth_bias_clamp: 0.0f32,
+            depth_bias_slope_factor: 0.0f32,
+            ..Default::default()
+        };
+
+        let multisampling_create_info = vk::PipelineMultisampleStateCreateInfo {
+            s_type: vk::PipelineMultisampleStateCreateInfo::STRUCTURE_TYPE,
+            sample_shading_enable: vk::FALSE,
+            rasterization_samples: vk::SampleCountFlags::TYPE_1,
+            min_sample_shading: 1.0f32,
+            p_sample_mask: null(),
+            alpha_to_coverage_enable: vk::FALSE,
+            alpha_to_one_enable: vk::FALSE,
+            ..Default::default()
+        };
+
+        let color_blend_attachment = vk::PipelineColorBlendAttachmentState {
+            color_write_mask: vk::ColorComponentFlags::R
+                | vk::ColorComponentFlags::G
+                | vk::ColorComponentFlags::B
+                | vk::ColorComponentFlags::A,
+            blend_enable: vk::FALSE,
+            src_color_blend_factor: vk::BlendFactor::ONE,
+            dst_color_blend_factor: vk::BlendFactor::ZERO,
+            color_blend_op: vk::BlendOp::ADD,
+            src_alpha_blend_factor: vk::BlendFactor::ONE,
+            dst_alpha_blend_factor: vk::BlendFactor::ZERO,
+            alpha_blend_op: vk::BlendOp::ADD,
+        };
+        let color_blending_create_info = vk::PipelineColorBlendStateCreateInfo {
+            s_type: vk::PipelineColorBlendStateCreateInfo::STRUCTURE_TYPE,
+            logic_op_enable: vk::FALSE,
+            logic_op: vk::LogicOp::COPY,
+            attachment_count: 1,
+            p_attachments: &color_blend_attachment as *const vk::PipelineColorBlendAttachmentState,
+            blend_constants: [0.0f32, 0.0f32, 0.0f32, 0.0f32],
+            ..Default::default()
+        };
+
+        let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo {
+            s_type: vk::PipelineLayoutCreateInfo::STRUCTURE_TYPE,
+            set_layout_count: 0,
+            p_set_layouts: null(),
+            push_constant_range_count: 0,
+            p_push_constant_ranges: null(),
+            ..Default::default()
+        };
+
+        let pipeline_layout = unsafe {
+            self.device
+                .create_pipeline_layout(&pipeline_layout_create_info, None)
+        }?;
+
+        let shader_stages = shaders
+            .iter()
+            .map(|shader| {
+                let info = self
+                    .shaders
+                    .get(shader)
+                    .ok_or(VulkanRendererError::VulkanError(format!(
+                        "Shader {shader:?} doesn't exist"
+                    )))?;
+                let shader_stage_create_info = vk::PipelineShaderStageCreateInfo {
+                    s_type: vk::PipelineShaderStageCreateInfo::STRUCTURE_TYPE,
+                    stage: match info.stage {
+                        renderer131::ShaderStage::Vertex => vk::ShaderStageFlags::VERTEX,
+                        renderer131::ShaderStage::Pixel => vk::ShaderStageFlags::FRAGMENT,
+                        renderer131::ShaderStage::Compute => vk::ShaderStageFlags::COMPUTE,
+                    },
+                    module: info.shader_module,
+                    p_name: c"main".as_ptr(),
+                    ..Default::default()
+                };
+
+                Ok(shader_stage_create_info)
+            })
+            .collect::<Result<Vec<_>, VulkanRendererError>>()?;
+
+        let render_pass = self.create_render_pass()?;
+        // Create pipeline after pipeline layout
+        let pipeline_create_info = vk::GraphicsPipelineCreateInfo {
+            s_type: vk::GraphicsPipelineCreateInfo::STRUCTURE_TYPE,
+            stage_count: shader_stages.len() as u32,
+            p_stages: shader_stages.as_ptr(),
+
+            p_vertex_input_state: &vertex_input_create_info
+                as *const vk::PipelineVertexInputStateCreateInfo,
+            p_input_assembly_state: &input_assembly_create_info
+                as *const vk::PipelineInputAssemblyStateCreateInfo,
+            p_viewport_state: &viewport_state_create_info
+                as *const vk::PipelineViewportStateCreateInfo,
+            p_rasterization_state: &rasterizer_create_info
+                as *const vk::PipelineRasterizationStateCreateInfo,
+            p_multisample_state: &multisampling_create_info
+                as *const vk::PipelineMultisampleStateCreateInfo,
+            p_depth_stencil_state: null(),
+            p_color_blend_state: &color_blending_create_info
+                as *const vk::PipelineColorBlendStateCreateInfo,
+            p_dynamic_state: &dynamic_state_create_info
+                as *const vk::PipelineDynamicStateCreateInfo,
+            layout: pipeline_layout,
+            render_pass,
+            // Which subpass of the render pass to use
+            subpass: 0,
+            base_pipeline_handle: vk::Pipeline::null(),
+            base_pipeline_index: -1,
+            ..Default::default()
+        };
+
+        let pipeline = *unsafe {
+            self.device
+                .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_create_info], None)
+                .map_err(|(_, err)| err)?
+        }
+        .first()
+        .unwrap();
+
+        Ok(VulkanPipelineData {
+            pipeline,
+            layout: pipeline_layout,
+            render_pass,
+        })
+    }
+
+    fn create_render_pass(&mut self) -> Result<vk::RenderPass, VulkanRendererError> {
+        let color_attachment = vk::AttachmentDescription {
+            format: self.swapchain.format.format,
+            samples: vk::SampleCountFlags::TYPE_1,
+            load_op: vk::AttachmentLoadOp::CLEAR,
+            store_op: vk::AttachmentStoreOp::STORE,
+            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
+            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+            initial_layout: vk::ImageLayout::UNDEFINED,
+            final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+            ..Default::default()
+        };
+
+        let color_attachment_ref = vk::AttachmentReference {
+            attachment: 0,
+            layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+        };
+
+        let subpass = vk::SubpassDescription {
+            pipeline_bind_point: vk::PipelineBindPoint::GRAPHICS,
+            color_attachment_count: 1,
+            p_color_attachments: &color_attachment_ref as *const vk::AttachmentReference,
+            ..Default::default()
+        };
+
+        let render_pass_create_info = vk::RenderPassCreateInfo {
+            s_type: vk::RenderPassCreateInfo::STRUCTURE_TYPE,
+            attachment_count: 1,
+            p_attachments: &color_attachment as *const vk::AttachmentDescription,
+            subpass_count: 1,
+            p_subpasses: &subpass as *const vk::SubpassDescription,
+            ..Default::default()
+        };
+
+        let render_pass = unsafe {
+            self.device
+                .create_render_pass(&render_pass_create_info, None)
+        }?;
+
+        Ok(render_pass)
+    }
+
+    pub(crate) unsafe fn create_shaders_impl(
+        &mut self,
+        infos: &[ShaderCreateInfo],
+    ) -> Result<Vec<ShaderHandle>, VulkanRendererError> {
+        unsafe {
+            let shader_handles = infos
+                .iter()
+                .map(|info| {
+                    let shader_module_create_info = vk::ShaderModuleCreateInfo {
+                        s_type: vk::ShaderModuleCreateInfo::STRUCTURE_TYPE,
+                        code_size: info.source.len(),
+                        p_code: info.source.as_ptr() as *const u32,
+                        ..Default::default()
+                    };
+
+                    let shader_module = self
+                        .device
+                        .create_shader_module(&shader_module_create_info, None)?;
+
+                    let shader_handle = self.shader_handles;
+                    self.shaders.insert(
+                        ShaderHandle::from_raw(shader_handle),
+                        VulkanShaderData {
+                            shader_module,
+                            stage: info.stage,
+                            name: CString::from_str(&info.name)?,
+                        },
+                    );
+                    self.shader_handles += 1;
+
+                    Ok(ShaderHandle::from_raw(shader_handle))
+                })
+                .collect::<Result<Vec<_>, VulkanRendererError>>()?;
+
+            Ok(shader_handles)
+        }
+    }
+
+    pub(crate) unsafe fn destroy_shaders_impl(
+        &mut self,
+        shaders: &[ShaderHandle],
+    ) -> Result<(), VulkanRendererError> {
+        unsafe {
+            let shader_metas = shaders
+                .iter()
+                .map(|handle| {
+                    self.shaders.get(handle).ok_or_else(|| {
+                        VulkanRendererError::VulkanError(format!(
+                            "Shader {handle:?} doesn't exist."
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<&VulkanShaderData>, VulkanRendererError>>()?;
+
+            for shader in shader_metas {
+                self.device
+                    .destroy_shader_module(shader.shader_module, None);
+            }
+
+            for shader in shaders {
+                self.shaders.remove(shader);
+            }
+
+            Ok(())
+        }
+    }
+
+    pub(crate) unsafe fn create_program_impl(
+        &mut self,
+        shaders: &[ShaderHandle],
+    ) -> Result<ProgramHandle, VulkanRendererError> {
+        let pipeline_hash = unsafe { self.get_or_create_pipeline(shaders) }?;
+
+        Ok(ProgramHandle::from_raw(pipeline_hash))
+    }
+    pub(crate) unsafe fn destroy_program_impl(
+        &mut self,
+        program: ProgramHandle,
+    ) -> Result<(), VulkanRendererError> {
+        let prog = self.pipelines.get(&program.as_raw()).ok_or_else(|| {
+            VulkanRendererError::VulkanError(format!("Program {program:?} doesn't exist"))
+        })?;
+
+        unsafe {
+            self.device.destroy_pipeline(prog.pipeline, None);
+            self.device.destroy_pipeline_layout(prog.layout, None);
+            self.device.destroy_render_pass(prog.render_pass, None);
+        }
+
+        self.pipelines.remove(&program.as_raw());
+
+        Ok(())
+    }
+
+    pub(crate) unsafe fn execute_impl(
+        &mut self,
+        program: ProgramHandle,
+    ) -> Result<(), VulkanRendererError> {
+        todo!()
+    }
+}

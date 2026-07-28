@@ -10,6 +10,7 @@ use ash::{
 };
 #[cfg(target_os = "linux")]
 use raw_window_handle::{WaylandDisplayHandle, WaylandWindowHandle};
+#[cfg(target_os = "windows")]
 use raw_window_handle::{Win32WindowHandle, WindowsDisplayHandle};
 use std::{
     ffi::{CStr, CString, c_void},
@@ -515,6 +516,7 @@ impl VulkanRenderer {
             Ok(surface.assume_init())
         }
     }
+    #[cfg(target_os = "windows")]
     unsafe fn create_surface_win32(
         instance: &Instance,
         instance_extensions: &InstanceExtensions,
@@ -971,6 +973,7 @@ impl VulkanRenderer {
                 swapchain_details,
                 swapchain,
                 format,
+                extent,
                 present_mode,
                 swapchain_images,
                 swapchain_image_views,
@@ -986,6 +989,8 @@ impl VulkanRenderer {
         enable_validation: ValidationLevel,
     ) -> Result<Self, VulkanRendererError> {
         unsafe {
+            use std::collections::HashMap;
+
             let required_extensions = window
                 .glfw
                 .get_required_instance_extensions()
@@ -1030,6 +1035,10 @@ impl VulkanRenderer {
                 swapchain,
                 surface,
                 debug_messenger,
+
+                pipelines: HashMap::default(),
+                shader_handles: 0usize,
+                shaders: HashMap::default(),
             })
         }
     }
@@ -1061,6 +1070,13 @@ impl Drop for VulkanRenderer {
         self.debug_messenger = None;
 
         unsafe {
+            for (_handle, pipeline) in &self.pipelines {
+                self.device.destroy_pipeline(pipeline.pipeline, None);
+                self.device.destroy_pipeline_layout(pipeline.layout, None);
+                self.device.destroy_render_pass(pipeline.render_pass, None);
+            }
+            self.pipelines.clear();
+
             for image_view in &self.swapchain.swapchain_image_views {
                 self.device.destroy_image_view(*image_view, None);
             }
