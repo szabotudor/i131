@@ -144,6 +144,8 @@ where
 {
     fn name(&self) -> &'static str;
 
+    fn destroy(&mut self) -> Result<(), RendererError>;
+
     fn create_shader(&mut self, info: ShaderCreateInfo) -> Result<ShaderHandle, RendererError>;
     fn create_shaders(
         &mut self,

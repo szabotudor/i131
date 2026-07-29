@@ -21,8 +21,8 @@ pub enum EditorError {
 }
 
 pub(crate) struct Editor {
-    window: Window,
     renderer: Box<dyn Renderer>,
+    window: Window,
     vert: ShaderHandle,
     frag: ShaderHandle,
     prog: ProgramHandle,
@@ -141,12 +141,10 @@ impl System for Editor {
     fn destroy(&mut self, engine: &engine131::I131) -> Result<(), engine131::systems::SystemError> {
         let _ = engine;
 
-        if !self.vert.is_null() {
-            self.renderer.destroy_shader(self.vert)?;
-        }
-        if !self.frag.is_null() {
-            self.renderer.destroy_shader(self.frag)?;
-        }
+        self.renderer.destroy()?;
+        self.vert = ShaderHandle::null();
+        self.frag = ShaderHandle::null();
+        self.prog = ProgramHandle::null();
 
         Ok(())
     }

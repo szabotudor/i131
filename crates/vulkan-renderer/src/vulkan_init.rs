@@ -2,7 +2,7 @@
 use crate::SwapchainData;
 use crate::{
     CommandPools, DebugMessengerData, DebugMessengerUserData, DeviceQueues, InstanceExtensions,
-    QueueFamilyIndices, ValidationLevel, VulkanRenderer, VulkanRendererError,
+    QueueFamilyIndices, ValidationLevel, VulkanPipelineData, VulkanRenderer, VulkanRendererError,
 };
 use ash::{
     Device, Entry, Instance,
@@ -1103,6 +1103,7 @@ impl VulkanRenderer {
             let in_flight_fence = device.create_fence(&fence_create_info, None)?;
 
             Ok(Self {
+                destroyed: false,
                 _entry: entry,
                 instance,
                 instance_extensions,
@@ -1128,14 +1129,15 @@ impl VulkanRenderer {
             })
         }
     }
-}
 
-impl Drop for VulkanRenderer {
-    fn drop(&mut self) {
-        match unsafe { self.device.device_wait_idle() } {
-            Ok(_) => {}
-            Err(err) => panic!("{err:?}"),
+    // TODO: Bandaid fix for UB caused by window destroyed before renderer is destroyed
+    pub(crate) unsafe fn destroy_impl(&mut self) -> Result<(), VulkanRendererError> {
+        if self.destroyed {
+            return Ok(());
         }
+        self.destroyed = true;
+
+        unsafe { self.device.device_wait_idle()? };
 
         if let Some(messenger) = &mut self.debug_messenger {
             unsafe {
@@ -1152,9 +1154,7 @@ impl Drop for VulkanRenderer {
 
             // This should drop the pointer kept by the messenger as p_user_data
             let _ = unsafe {
-                Box::from_raw(
-                    messenger.p_user_data_ptr as *mut Arc<RwLock<Vec<VulkanRendererError>>>,
-                )
+                Box::from_raw(messenger.p_user_data_ptr as *mut Arc<RwLock<VulkanRendererError>>)
             };
             messenger.p_user_data_ptr = null::<c_void>() as *mut c_void;
         }
@@ -1210,5 +1210,16 @@ impl Drop for VulkanRenderer {
             );
             self.instance.destroy_instance(None);
         }
+
+        Ok(())
+    }
+}
+
+impl Drop for VulkanRenderer {
+    fn drop(&mut self) {
+        match self.destroy_impl() {
+            Ok(_) => {}
+            Err(err) => panic!("{err:?}"),
+        };
     }
 }

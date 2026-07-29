@@ -154,6 +154,7 @@ struct VulkanPipelineData {
 }
 
 pub struct VulkanRenderer {
+    destroyed: bool,
     _entry: Entry,
     instance: Instance,
     instance_extensions: InstanceExtensions,
@@ -202,6 +203,11 @@ impl VulkanRenderer {
 impl Renderer for VulkanRenderer {
     fn name(&self) -> &'static str {
         "Vulkan"
+    }
+
+    fn destroy(&mut self) -> Result<(), RendererError> {
+        unsafe { self.destroy_impl() }?;
+        Ok(())
     }
 
     fn create_shader(&mut self, source: ShaderCreateInfo) -> Result<ShaderHandle, RendererError> {
