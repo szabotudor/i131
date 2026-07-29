@@ -533,17 +533,20 @@ impl I131 {
         Ok(())
     }
     pub(crate) fn process_create_and_destroy_queues(&self) -> Result<(), SystemError> {
-        {
+        let change = {
             let mut state = self.wait_until_end_of_frame()?;
 
             let create_queue = state.system_create_queue.drain().collect::<Vec<_>>();
+            let destroy_queue = state.system_destroy_queue.drain().collect::<Vec<_>>();
+
+            let change = !create_queue.is_empty() || !destroy_queue.is_empty();
+
             for (sys_id, system_data) in create_queue {
                 state
                     .all_systems
                     .insert(sys_id, Arc::new(RwLock::new(system_data)));
             }
 
-            let destroy_queue = state.system_destroy_queue.drain().collect::<Vec<_>>();
             for sys_id in destroy_queue {
                 {
                     let mut system_data = state
@@ -566,9 +569,13 @@ impl I131 {
             if state.all_systems.is_empty() {
                 state.state = EngineState::Stopped;
             }
-        }
 
-        self.recompute_schedule()?;
+            change
+        };
+
+        if change {
+            self.recompute_schedule()?;
+        }
         Ok(())
     }
 
