@@ -1217,7 +1217,7 @@ impl VulkanRenderer {
 
 impl Drop for VulkanRenderer {
     fn drop(&mut self) {
-        match self.destroy_impl() {
+        match unsafe { self.destroy_impl() } {
             Ok(_) => {}
             Err(err) => panic!("{err:?}"),
         };
