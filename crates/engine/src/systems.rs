@@ -1,15 +1,12 @@
+use crate::{AffinityFor, EngineData, EngineState, I131, Thread131};
+use renderer131::RendererError;
 use std::{
-    any::{Any, type_name},
-    collections::{HashMap, HashSet},
+    any::Any,
     fmt::{Debug, Display},
-    ops::{Deref, DerefMut},
-    sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard},
+    sync::{Arc, MutexGuard, PoisonError, RwLock, RwLockWriteGuard},
     thread::JoinHandle,
     time::{SystemTime, SystemTimeError},
 };
-
-use crate::{EngineState, I131};
-use renderer131::RendererError;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -77,11 +74,13 @@ pub(crate) struct SystemData {
     pub(crate) destroyed: bool,
     pub(crate) system: Box<dyn System>,
     pub(crate) dependencies: &'static [SystemId],
+    pub(crate) system_id: SystemId,
+    pub(crate) affinity: &'static str,
 }
 unsafe impl Send for SystemData {}
 unsafe impl Sync for SystemData {}
 impl SystemData {
-    pub(crate) fn new<T: System + 'static>(system: T) -> Self {
+    pub(crate) fn new<T: System + 'static>(system: T, affinity: &'static str) -> Self {
         Self {
             last_update: SystemTime::now(),
             initialized: false,
@@ -90,95 +89,16 @@ impl SystemData {
             destroyed: false,
             system: Box::new(system),
             dependencies: T::dependencies(),
+            system_id: T::system_id(),
+            affinity,
         }
     }
 }
 
-pub struct SystemAccess {
-    data: Arc<RwLock<SystemData>>,
-}
-
-pub struct SystemDataReadGuard<'a, T> {
-    _guard: RwLockReadGuard<'a, SystemData>,
-    value: &'a T,
-}
-impl<T> Deref for SystemDataReadGuard<'_, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        self.value
-    }
-}
-
-pub struct SystemDataWriteGuard<'a, T> {
-    _guard: RwLockWriteGuard<'a, SystemData>,
-    value: &'a mut T,
-}
-impl<T> Deref for SystemDataWriteGuard<'_, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        self.value
-    }
-}
-impl<T> DerefMut for SystemDataWriteGuard<'_, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.value
-    }
-}
-
-impl SystemAccess {
-    pub(crate) fn new(data: Arc<RwLock<SystemData>>) -> Self {
-        Self { data }
-    }
-    pub fn read<T: System + 'static>(&self) -> Result<SystemDataReadGuard<'_, T>, SystemError> {
-        let guard = self.data.read()?;
-        let value =
-            guard
-                .system
-                .downcast_ref()
-                .ok_or_system_error(SystemError::WrongSystemType(
-                    T::system_id(),
-                    type_name::<T>(),
-                ))?;
-        // Borrow erasure is safe because lock owns the data, and lock should be dropped along with
-        // SystemDataReadGuard
-        //
-        // Even if it isn't, the user shouldn't be able to access `value` after they drop
-        // SystemDataReadGuard
-        let value = value as *const T;
-
-        Ok(SystemDataReadGuard {
-            _guard: guard,
-            value: unsafe { &*value },
-        })
-    }
-
-    pub fn write<T: System + 'static>(
-        &mut self,
-    ) -> Result<SystemDataWriteGuard<'_, T>, SystemError> {
-        let mut guard = self.data.write()?;
-        let value =
-            guard
-                .system
-                .downcast_mut()
-                .ok_or_system_error(SystemError::WrongSystemType(
-                    T::system_id(),
-                    type_name::<T>(),
-                ))?;
-        // See comment above
-        let value = value as *mut T;
-
-        Ok(SystemDataWriteGuard {
-            _guard: guard,
-            value: unsafe { &mut *value },
-        })
-    }
-}
-
+#[derive(Default)]
 pub(crate) struct ThreadData {
     system_data: Vec<Arc<RwLock<SystemData>>>,
-    join_handle: JoinHandle<Result<(), SystemError>>,
+    join_handle: Option<JoinHandle<Result<(), SystemError>>>,
 }
 unsafe impl Sync for ThreadData {}
 unsafe impl Send for ThreadData {}
@@ -311,24 +231,30 @@ impl I131 {
     }
 
     /// Contains the thread update function too
-    pub(crate) fn create_thread(&self) -> Result<(), SystemError> {
+    pub fn create_thread<ST: Thread131 + 'static>(
+        &self,
+        thread: ST,
+        state: &mut MutexGuard<'_, EngineData>,
+    ) -> Result<(), SystemError> {
         let engine = self
             .engine
             .upgrade()
             .ok_or_system_error(SystemError::InvalidEngine)?;
 
+        let name = ST::NAME;
         let thread_fn = || -> Result<(), SystemError> {
             let thread_id = std::thread::current().id();
             let engine = engine;
+            let thread = thread;
 
             let (thread_data, mut state) = {
                 // Wait until engine is running
                 let engine_data = engine.wait_while(|data| {
-                    data.state != EngineState::Running || !data.thread_data.contains_key(&thread_id)
+                    data.state != EngineState::Running || !data.thread_data.contains_key(ST::NAME)
                 })?;
                 let thread_data = engine_data
                     .thread_data
-                    .get(&thread_id)
+                    .get(ST::NAME)
                     .ok_or_system_error(SystemError::SystemThreadError(format!(
                         "System thread doesn't exist for thread id {thread_id:?}"
                     )))?
@@ -338,152 +264,36 @@ impl I131 {
             };
 
             while state == EngineState::Running {
-                // Wait until the engine signals the next frame to start
-                {
-                    let mut lock = engine
-                        .wait_while(|data| data.ticking_threads.ticking.contains(&thread_id))?;
-                    lock.ticking_threads.ticking.insert(thread_id);
-                }
-
-                {
-                    let data = thread_data.read()?;
-                    let systems = data
-                        .system_data
-                        .iter()
-                        .rev()
-                        .map(|system| Ok(system.write()?))
-                        .collect::<Result<Vec<_>, SystemError>>()?;
-
-                    {
-                        let mut lock = engine.lock()?;
-                        lock.ticking_threads.locks_acquired.insert(thread_id);
-                    }
-                    engine.notify_all();
-
-                    {
-                        let _lock = engine.wait_until(|data| {
-                            data.thread_data
-                                .keys()
-                                .all(|id| data.ticking_threads.locks_acquired.contains(id))
-                        })?;
-                    }
-
-                    Self::thread_tick(&engine, state, systems)?;
-                }
-
-                {
-                    let mut lock = engine.lock()?;
-                    lock.ticking_threads.ticked.insert(thread_id);
-                    state = lock.state;
-                }
-                engine.notify_all();
-
-                // println!("Finished frame on {thread_id:?}");
+                state = engine.lock()?.state;
             }
 
             Ok(())
         };
 
         let join_handle = std::thread::spawn(thread_fn);
-        let thread_id = join_handle.thread().id();
 
         let thread_data = Arc::new(RwLock::new(ThreadData {
             system_data: Vec::default(),
-            join_handle,
+            join_handle: Some(join_handle),
         }));
 
-        {
-            let mut engine_data = self.lock()?;
-            engine_data.thread_data.insert(thread_id, thread_data);
-        }
-        self.notify_all();
+        state.thread_data.insert(name, thread_data);
 
         Ok(())
     }
 
-    pub fn initialize(&self) -> Result<(), SystemError> {
-        {
-            let mut lock = self.lock()?;
-            if lock.state != EngineState::Uninitialized {
-                return Err(SystemError::InvalidEngineState(
-                    "Engine cannot be initialized more than once".to_string(),
-                ));
-            }
-
-            // TODO: Internal system init
-            // Will add built-in systems here
-
-            lock.state = EngineState::Initialized;
-        }
-        self.notify_all();
-        Ok(())
-    }
-
-    pub(crate) fn run(&self) -> Result<(), SystemError> {
-        {
-            let mut lock = self.lock()?;
-            if lock.state != EngineState::Initialized {
-                return Err(SystemError::InvalidEngineState(
-                    "Cannot run engine before initialization, or after stop".to_string(),
-                ));
-            }
-
-            // TODO: Internal prepare for run
-
-            lock.state = EngineState::Running;
-        }
-        self.notify_all();
-
-        let _lock = self.wait_while(|data| {
-            data.thread_data
-                .iter()
-                .all(|(thread_id, _)| data.ticking_threads.ticking.contains(thread_id))
-        })?;
-        Ok(())
-    }
-
-    pub(crate) fn recompute_schedule(&self) -> Result<(), SystemError> {
-        let state = self.wait_until_end_of_frame()?;
-
-        let tree = state
-            .all_systems
-            .iter()
-            .map(
-                |(sys, deps)| -> Result<(SystemId, HashSet<SystemId>), SystemError> {
-                    let deps = deps
-                        .read()?
-                        .dependencies
-                        .iter()
-                        .copied()
-                        .collect::<HashSet<_>>();
-                    Ok((*sys, deps))
-                },
-            )
-            .collect::<Result<HashMap<SystemId, HashSet<SystemId>>, SystemError>>()?;
-
-        let scheduled_threads = state.scheduler.schedule(&tree, state.thread_data.len())?;
-
-        for (schedule, (_, thread_data)) in scheduled_threads.iter().zip(state.thread_data.iter()) {
-            let mut thread_data = thread_data.write()?;
-            let systems = schedule
-                .iter()
-                .map(|sys| {
-                    state
-                        .all_systems
-                        .get(sys)
-                        .cloned()
-                        .ok_or_system_error(SystemError::MissingSystem(*sys))
-                })
-                .collect::<Result<Vec<_>, SystemError>>()?;
-            thread_data.system_data = systems;
-        }
-
-        Ok(())
-    }
-
-    pub fn create_system<T: System + 'static>(&self, system: T) -> Result<(), SystemError> {
+    pub fn create_system<T: System + 'static, ST: Thread131 + 'static>(
+        &self,
+        system: T,
+        #[expect(unused_variables, reason = "Empty marker used for type info")]
+        affinity: AffinityFor<ST>,
+    ) -> Result<(), SystemError> {
         let mut state = self.lock()?;
-        let system_data = SystemData::new(system);
+        if state.get_thread_data(ST::NAME).is_none() {
+            self.create_thread(ST::new(), &mut state)?;
+        }
+
+        let system_data = SystemData::new(system, ST::NAME);
 
         if state.system_create_queue.contains_key(&T::system_id())
             || state.all_systems.contains_key(&T::system_id())
@@ -532,64 +342,89 @@ impl I131 {
 
         Ok(())
     }
+
     pub(crate) fn process_create_and_destroy_queues(&self) -> Result<(), SystemError> {
-        let change = {
-            let mut state = self.wait_until_end_of_frame()?;
+        let mut systems_to_destroy = vec![];
+        {
+            let mut state = self.lock()?;
 
             let create_queue = state.system_create_queue.drain().collect::<Vec<_>>();
             let destroy_queue = state.system_destroy_queue.drain().collect::<Vec<_>>();
 
-            let change = !create_queue.is_empty() || !destroy_queue.is_empty();
-
             for (sys_id, system_data) in create_queue {
-                state
-                    .all_systems
-                    .insert(sys_id, Arc::new(RwLock::new(system_data)));
+                let thread_name = system_data.affinity;
+                let thread = state.get_thread_data(thread_name).ok_or_system_error(
+                    SystemError::SystemThreadError(format!("Thread {thread_name} doesn't exist")),
+                )?;
+
+                let slot = {
+                    let mut thread_data = thread.write()?;
+                    thread_data
+                        .system_data
+                        .push(Arc::new(RwLock::new(system_data)));
+
+                    thread_data.system_data.len() - 1
+                };
+
+                state.all_systems.insert(sys_id, (thread_name, slot));
             }
 
             for sys_id in destroy_queue {
-                {
-                    let mut system_data = state
+                let (thread_name, slot) = *state
+                    .all_systems
+                    .get(&sys_id)
+                    .ok_or_system_error(SystemError::MissingSystem(sys_id))?;
+                let thread = state.get_thread_data(thread_name).ok_or_system_error(
+                    SystemError::SystemThreadError(format!("Thread {thread_name} doesn't exist")),
+                )?;
+                let systems_to_change = {
+                    let mut thread_data = thread.write()?;
+
+                    let system = thread_data.system_data.remove(slot);
+                    systems_to_destroy.push(system);
+
+                    thread_data.system_data.split_at(slot).1.to_vec()
+                };
+
+                for system in systems_to_change {
+                    let system = system.read()?;
+                    let system_id = system.system_id;
+                    let (_, slot) = state
                         .all_systems
-                        .get(&sys_id)
-                        .ok_or_system_error(SystemError::MissingSystem(sys_id))?
-                        .write()?;
-                    if !system_data.destroyed {
-                        if system_data.playing {
-                            system_data.system.end_play(self)?;
-                        }
-                        if system_data.initialized {
-                            system_data.system.destroy(self)?;
-                        }
-                    }
+                        .get_mut(&system_id)
+                        .ok_or_system_error(SystemError::MissingSystem(system_id))?;
+                    *slot -= 1;
                 }
+
                 state.all_systems.remove(&sys_id);
             }
 
             if state.all_systems.is_empty() {
                 state.state = EngineState::Stopped;
             }
-
-            change
-        };
-
-        if change {
-            self.recompute_schedule()?;
         }
+
+        for system in systems_to_destroy {
+            let mut system_data = system.write()?;
+
+            if !system_data.destroyed {
+                if system_data.playing {
+                    system_data.system.end_play(self)?;
+                    system_data.playing = false;
+                }
+                if system_data.initialized {
+                    system_data.system.destroy(self)?;
+                    system_data.initialized = false;
+                }
+
+                system_data.destroyed = true;
+            }
+        }
+
         Ok(())
     }
 
-    pub fn system<T: System + 'static>(
-        &self,
-        system_id: &SystemId,
-    ) -> Result<SystemAccess, SystemError> {
-        let state = self.lock()?;
-        let system = state
-            .all_systems
-            .get(system_id)
-            .ok_or_system_error(SystemError::MissingSystem(*system_id))?
-            .clone();
-
-        Ok(SystemAccess::new(system))
+    pub fn system<T: System + 'static>(&self, system_id: &SystemId) -> Result<&T, SystemError> {
+        todo!()
     }
 }

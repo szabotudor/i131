@@ -1,21 +1,16 @@
 pub mod builtin;
-pub mod schedulers;
 pub mod systems;
 
+use crate::systems::{SystemData, SystemError, SystemId, ThreadData};
 use std::{
     collections::{HashMap, HashSet},
+    marker::PhantomData,
     sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, Weak},
-    thread::ThreadId,
 };
 
 pub use math131;
 pub use renderer131;
 pub use window131;
-
-use crate::{
-    schedulers::SystemScheduler,
-    systems::{SystemData, SystemError, SystemId, ThreadData},
-};
 
 #[derive(Default, Clone, Copy, PartialEq, Debug)]
 pub enum EngineState {
@@ -26,24 +21,79 @@ pub enum EngineState {
     Running,
     Stopped,
 }
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum EngineStage {
+    Ticking,
+    EndOfTick,
+}
 
-#[derive(Default, Debug)]
-pub(crate) struct TickingThreads {
-    ticking: HashSet<ThreadId>,
-    ticked: HashSet<ThreadId>,
-    locks_acquired: HashSet<ThreadId>,
+pub enum TicksPerSecond {
+    /// No TPS requirement, run as fast as possible
+    FullSpeed,
+    /// Prefer set TPS. Log a warning if tick takes too long and thread falls behind
+    Prefer(f32),
+    /// Require set TPS. Throw an error if tick takes too long and thread falls behind consistently
+    /// (more than `threshold`% of the time. Set `threshold` to 0.0 to instantly throw the moment
+    /// that the required tick rate isn't met)
+    Require { requirement: f32, threshold: f32 },
+}
+
+pub trait Thread131
+where
+    Self: Sized + Send + Sync,
+{
+    const NAME: &'static str;
+    const TPS: TicksPerSecond;
+    const AFFINITY: AffinityFor<Self> = AffinityFor::<Self>::new();
+
+    /// Create a new thread
+    fn new() -> Self;
+}
+
+pub struct AffinityFor<T: Thread131> {
+    _marker: PhantomData<T>,
+}
+impl<T: Thread131> AffinityFor<T> {
+    pub const fn new() -> Self {
+        Self {
+            _marker: PhantomData::<T> {},
+        }
+    }
+}
+
+/// The engine's main thread, called "Main"
+/// Runs as fast as possible (0.0 TPS)
+pub struct MainThread {}
+impl Thread131 for MainThread {
+    const NAME: &'static str = "Main";
+    const TPS: TicksPerSecond = TicksPerSecond::FullSpeed;
+
+    fn new() -> Self
+    where
+        Self: Sized,
+    {
+        Self {}
+    }
 }
 
 pub(crate) struct EngineData {
     system_create_queue: HashMap<SystemId, SystemData>,
     system_destroy_queue: HashSet<SystemId>,
-    thread_data: HashMap<ThreadId, Arc<RwLock<ThreadData>>>,
-    all_systems: HashMap<SystemId, Arc<RwLock<SystemData>>>,
+    thread_data: HashMap<&'static str, Arc<RwLock<ThreadData>>>,
+    main_thread: Arc<RwLock<ThreadData>>,
+    all_systems: HashMap<SystemId, (&'static str, usize)>,
     /// Will be incremented by each thread at the end of their ticks
     /// Engine will reset at end of frame when every thread is done
-    ticking_threads: TickingThreads,
     state: EngineState,
-    scheduler: Box<dyn SystemScheduler>,
+    stage: EngineStage,
+}
+impl EngineData {
+    pub(crate) fn get_thread_data(&self, name: &'static str) -> Option<&Arc<RwLock<ThreadData>>> {
+        match name {
+            "Main" => Some(&self.main_thread),
+            other => self.thread_data.get(other),
+        }
+    }
 }
 
 pub struct I131 {
@@ -55,10 +105,7 @@ unsafe impl Send for I131 {}
 unsafe impl Sync for I131 {}
 
 impl I131 {
-    pub fn new(
-        num_threads: usize,
-        scheduler: Box<dyn SystemScheduler>,
-    ) -> Result<Arc<Self>, SystemError> {
+    pub fn new() -> Result<Arc<Self>, SystemError> {
         let engine = Arc::new_cyclic(|engine| Self {
             engine: engine.clone(),
             state: (
@@ -66,24 +113,22 @@ impl I131 {
                     system_create_queue: HashMap::new(),
                     system_destroy_queue: HashSet::new(),
                     thread_data: HashMap::new(),
+                    main_thread: Arc::default(),
                     all_systems: HashMap::new(),
-                    ticking_threads: TickingThreads::default(),
                     state: EngineState::default(),
-                    scheduler,
+                    stage: EngineStage::Ticking,
                 }),
                 Condvar::new(),
             ),
         });
 
-        for _ in 0..num_threads {
-            engine.create_thread()?;
-        }
-
         Ok(engine)
     }
 
     pub fn main_loop(&self) -> Result<(), SystemError> {
-        self.run()?;
+        // If any init code needs to run, it should be here
+
+        self.lock()?.state = EngineState::Running;
         loop {
             {
                 let mut lock = self.lock()?;
@@ -91,22 +136,18 @@ impl I131 {
                     println!("Stopping engine");
                     break;
                 }
-                lock.ticking_threads.ticked.clear();
-                lock.ticking_threads.ticking.clear();
-                lock.ticking_threads.locks_acquired.clear();
+                lock.stage = EngineStage::Ticking;
             }
             self.notify_all();
 
-            {
-                // Just need to wait until all threads are done
-                let _lock = self.wait_until(|data| {
-                    data.thread_data
-                        .iter()
-                        .all(|(thread_id, _)| data.ticking_threads.ticked.contains(thread_id))
-                })?;
-            };
+            // TODO: System updates
 
-            self.process_create_and_destroy_queues()?;
+            {
+                self.process_create_and_destroy_queues()?;
+                let mut state = self.lock()?;
+                state.stage = EngineStage::EndOfTick;
+            }
+            self.notify_all();
         }
 
         Ok(())
@@ -122,11 +163,8 @@ impl I131 {
     pub(crate) fn wait_until_end_of_frame(
         &self,
     ) -> Result<MutexGuard<'_, EngineData>, SystemError> {
-        self.wait_until(|data| {
-            data.thread_data
-                .iter()
-                .all(|(thread_id, _)| data.ticking_threads.ticked.contains(thread_id))
-        })
+        let lock = self.wait_until(|engine| engine.stage == EngineStage::EndOfTick)?;
+        Ok(lock)
     }
     pub(crate) fn wait_while<F: FnMut(&mut EngineData) -> bool>(
         &self,

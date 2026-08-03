@@ -1,4 +1,4 @@
-use engine131::{I131, renderer131::shaders_file, schedulers::DAGScheduler};
+use engine131::{I131, MainThread, Thread131, renderer131::shaders_file};
 
 use crate::editor::Editor;
 
@@ -25,13 +25,12 @@ fn main() -> Result<(), i32> {
     // TODO: File isn't used now, but if it's used in the future this line can be removed
     let _ = shaders_vulkan::SHADERS;
 
-    let engine = I131::new(3, Box::new(DAGScheduler::new())).print()?;
+    let engine = I131::new().print()?;
     println!("Created engine");
 
-    engine.initialize().print()?;
-    println!("Initialized engine");
-
-    engine.create_system(Editor::new().print()?).print()?;
+    engine
+        .create_system(Editor::new().print()?, MainThread::AFFINITY)
+        .print()?;
     println!("Opened editor");
 
     engine.main_loop().print()?;
