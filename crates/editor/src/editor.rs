@@ -149,7 +149,13 @@ impl System for Editor {
         Ok(())
     }
 
-    fn dependencies() -> &'static [engine131::systems::SystemId]
+    fn after() -> &'static [engine131::systems::SystemId]
+    where
+        Self: Sized,
+    {
+        &[]
+    }
+    fn before() -> &'static [engine131::systems::SystemId]
     where
         Self: Sized,
     {

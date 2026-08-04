@@ -1,9 +1,10 @@
-use crate::{AffinityFor, EngineData, EngineState, I131, Thread131};
+use crate::{AffinityFor, EngineData, EngineState, I131, SystemOp, Thread131};
 use renderer131::RendererError;
 use std::{
     any::Any,
+    collections::{BTreeSet, HashMap, HashSet},
     fmt::{Debug, Display},
-    sync::{Arc, MutexGuard, PoisonError, RwLock, RwLockWriteGuard},
+    sync::{Arc, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard},
     thread::JoinHandle,
     time::{SystemTime, SystemTimeError},
 };
@@ -73,7 +74,8 @@ pub(crate) struct SystemData {
     pub(crate) queued_for_destroy: bool,
     pub(crate) destroyed: bool,
     pub(crate) system: Box<dyn System>,
-    pub(crate) dependencies: &'static [SystemId],
+    pub(crate) after: &'static [SystemId],
+    pub(crate) before: &'static [SystemId],
     pub(crate) system_id: SystemId,
     pub(crate) affinity: &'static str,
 }
@@ -88,7 +90,8 @@ impl SystemData {
             queued_for_destroy: false,
             destroyed: false,
             system: Box::new(system),
-            dependencies: T::dependencies(),
+            after: T::after(),
+            before: T::before(),
             system_id: T::system_id(),
             affinity,
         }
@@ -97,7 +100,8 @@ impl SystemData {
 
 #[derive(Default)]
 pub(crate) struct ThreadData {
-    system_data: Vec<Arc<RwLock<SystemData>>>,
+    system_data: HashMap<SystemId, Arc<RwLock<SystemData>>>,
+    order: Vec<SystemId>,
     join_handle: Option<JoinHandle<Result<(), SystemError>>>,
 }
 unsafe impl Sync for ThreadData {}
@@ -111,7 +115,7 @@ impl Debug for ThreadData {
     }
 }
 
-#[derive(PartialEq, Eq, Default, Debug, Clone, Copy, Hash)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Default, Debug, Clone, Copy, Hash)]
 pub struct SystemId(pub &'static str);
 impl Display for SystemId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -152,11 +156,12 @@ where
     /// Only called when the game or editor are exited,
     fn destroy(&mut self, engine: &I131) -> Result<(), SystemError>;
 
-    /// Returns list of dependencies for this system.
-    /// Dependencies' update function will be scheduled before this system.
-    ///
-    /// Only dependencies are available to this system through `engine.system<T>()`
-    fn dependencies() -> &'static [SystemId]
+    /// Returns list of systems on the same thread to update before this system.
+    fn after() -> &'static [SystemId]
+    where
+        Self: Sized;
+    /// Returns list of systems on the same thread to update only after this system.
+    fn before() -> &'static [SystemId]
     where
         Self: Sized;
 
@@ -231,7 +236,7 @@ impl I131 {
     }
 
     /// Contains the thread update function too
-    pub fn create_thread<ST: Thread131 + 'static>(
+    pub(crate) fn create_thread<ST: Thread131 + 'static>(
         &self,
         thread: ST,
         state: &mut MutexGuard<'_, EngineData>,
@@ -273,7 +278,8 @@ impl I131 {
         let join_handle = std::thread::spawn(thread_fn);
 
         let thread_data = Arc::new(RwLock::new(ThreadData {
-            system_data: Vec::default(),
+            system_data: HashMap::default(),
+            order: Vec::default(),
             join_handle: Some(join_handle),
         }));
 
@@ -295,15 +301,15 @@ impl I131 {
 
         let system_data = SystemData::new(system, ST::NAME);
 
-        if state.system_create_queue.contains_key(&T::system_id())
+        if state.system_op_queue.contains_key(&T::system_id())
             || state.all_systems.contains_key(&T::system_id())
         {
             return Err(SystemError::SystemAlreadyExists(T::system_id()));
         }
 
         state
-            .system_create_queue
-            .insert(T::system_id(), system_data);
+            .system_op_queue
+            .insert(T::system_id(), SystemOp::Create(system_data));
 
         Ok(())
     }
@@ -311,12 +317,12 @@ impl I131 {
         let mut state = self.lock()?;
 
         if !state.all_systems.contains_key(&system_id)
-            || state.system_destroy_queue.contains(&system_id)
+            || state.system_op_queue.contains_key(&system_id)
         {
             return Err(SystemError::MissingSystem(system_id));
         }
 
-        state.system_destroy_queue.insert(system_id);
+        state.system_op_queue.insert(system_id, SystemOp::Destroy);
 
         Ok(())
     }
@@ -326,77 +332,158 @@ impl I131 {
     ) -> Result<(), SystemError> {
         let mut state = self.lock()?;
 
-        let system_ids = system_ids.into_iter().collect::<Vec<_>>();
+        let system_ids = system_ids
+            .into_iter()
+            .map(|id| (id, SystemOp::Destroy))
+            .collect::<Vec<_>>();
 
-        let any_missing_system = system_ids
-            .iter()
-            .find(|id| {
-                !state.all_systems.contains_key(id) || state.system_destroy_queue.contains(id)
-            })
-            .cloned();
-        if let Some(system_id) = any_missing_system {
-            return Err(SystemError::MissingSystem(system_id));
+        let any_missing_system = system_ids.iter().find(|(id, _)| {
+            !state.all_systems.contains_key(id) || state.system_op_queue.contains_key(id)
+        });
+        if let Some((system_id, _)) = any_missing_system {
+            return Err(SystemError::MissingSystem(system_id.clone()));
         }
 
-        state.system_destroy_queue.extend(system_ids);
+        state.system_op_queue.extend(system_ids);
 
         Ok(())
+    }
+
+    fn sort_systems(
+        systems: HashMap<SystemId, RwLockReadGuard<'_, SystemData>>,
+    ) -> Result<Vec<SystemId>, SystemError> {
+        todo!("This is written by AI. me no like");
+
+        let mut in_degree: HashMap<SystemId, usize> = systems.keys().map(|&id| (id, 0)).collect();
+        let mut edges: HashMap<SystemId, Vec<SystemId>> =
+            systems.keys().map(|&id| (id, Vec::new())).collect();
+
+        for (&id, data) in &systems {
+            let after = data
+                .after
+                .iter()
+                .filter(|dep| systems.contains_key(dep))
+                .collect::<Vec<_>>();
+            let before = data
+                .before
+                .iter()
+                .filter(|dep| systems.contains_key(dep))
+                .collect::<Vec<_>>();
+
+            for &dependency in after {
+                edges.get_mut(&dependency).unwrap().push(id);
+                *in_degree.get_mut(&id).unwrap() += 1;
+            }
+            for &dependent in before {
+                edges.get_mut(&id).unwrap().push(dependent);
+                *in_degree.get_mut(&dependent).unwrap() += 1;
+            }
+        }
+
+        let mut ready: BTreeSet<SystemId> = in_degree
+            .iter()
+            .filter(|&(_, &degree)| degree == 0)
+            .map(|(&id, _)| id)
+            .collect();
+
+        let mut order = Vec::with_capacity(systems.len());
+        let mut placed: HashSet<SystemId> = HashSet::with_capacity(systems.len());
+
+        while let Some(&next) = ready.iter().next() {
+            ready.remove(&next);
+            order.push(next);
+            placed.insert(next);
+
+            for &dependent in &edges[&next] {
+                let degree = in_degree.get_mut(&dependent).unwrap();
+                *degree -= 1;
+                if *degree == 0 {
+                    ready.insert(dependent);
+                }
+            }
+        }
+
+        if order.len() != systems.len() {
+            let stuck: Vec<SystemId> = systems
+                .keys()
+                .copied()
+                .filter(|id| !placed.contains(id))
+                .collect();
+            return Err(SystemError::SystemCyclicDependency(stuck));
+        }
+
+        Ok(order)
     }
 
     pub(crate) fn process_create_and_destroy_queues(&self) -> Result<(), SystemError> {
         let mut systems_to_destroy = vec![];
         {
             let mut state = self.lock()?;
+            let queue = state.system_op_queue.drain().collect::<HashMap<_, _>>();
 
-            let create_queue = state.system_create_queue.drain().collect::<Vec<_>>();
-            let destroy_queue = state.system_destroy_queue.drain().collect::<Vec<_>>();
+            let per_thread = queue.into_iter().try_fold(
+                HashMap::new(),
+                |mut acc, (id, op)| -> Result<_, SystemError> {
+                    let thread_name = match &op {
+                        SystemOp::Create(system_data) => system_data.affinity,
+                        SystemOp::Destroy => state
+                            .all_systems
+                            .get(&id)
+                            .cloned()
+                            .ok_or_system_error(SystemError::MissingSystem(id))?,
+                    };
+                    let entry = acc.entry(thread_name).or_insert_with(|| Vec::default());
 
-            for (sys_id, system_data) in create_queue {
-                let thread_name = system_data.affinity;
-                let thread = state.get_thread_data(thread_name).ok_or_system_error(
-                    SystemError::SystemThreadError(format!("Thread {thread_name} doesn't exist")),
-                )?;
+                    entry.push((id, op));
+                    Ok(acc)
+                },
+            )?;
 
-                let slot = {
-                    let mut thread_data = thread.write()?;
-                    thread_data
-                        .system_data
-                        .push(Arc::new(RwLock::new(system_data)));
+            for (thread_name, ops) in per_thread {
+                let thread = state
+                    .get_thread_data(thread_name)
+                    .cloned()
+                    .ok_or_system_error(SystemError::SystemThreadError(format!(
+                        "Thread {thread_name} doesn't exist"
+                    )))?;
+                let mut thread_data = thread.write()?;
 
-                    thread_data.system_data.len() - 1
-                };
+                for (system_id, op) in ops {
+                    match op {
+                        SystemOp::Create(system_data) => {
+                            state.all_systems.insert(system_id, thread_name);
 
-                state.all_systems.insert(sys_id, (thread_name, slot));
-            }
+                            thread_data
+                                .system_data
+                                .insert(system_data.system_id, Arc::new(RwLock::new(system_data)));
+                        }
+                        SystemOp::Destroy => {
+                            let system = thread_data
+                                .system_data
+                                .remove(&system_id)
+                                .ok_or_system_error(SystemError::MissingSystem(system_id))?;
+                            systems_to_destroy.push(system);
 
-            for sys_id in destroy_queue {
-                let (thread_name, slot) = *state
-                    .all_systems
-                    .get(&sys_id)
-                    .ok_or_system_error(SystemError::MissingSystem(sys_id))?;
-                let thread = state.get_thread_data(thread_name).ok_or_system_error(
-                    SystemError::SystemThreadError(format!("Thread {thread_name} doesn't exist")),
-                )?;
-                let systems_to_change = {
-                    let mut thread_data = thread.write()?;
-
-                    let system = thread_data.system_data.remove(slot);
-                    systems_to_destroy.push(system);
-
-                    thread_data.system_data.split_at(slot).1.to_vec()
-                };
-
-                for system in systems_to_change {
-                    let system = system.read()?;
-                    let system_id = system.system_id;
-                    let (_, slot) = state
-                        .all_systems
-                        .get_mut(&system_id)
-                        .ok_or_system_error(SystemError::MissingSystem(system_id))?;
-                    *slot -= 1;
+                            state.all_systems.remove(&system_id);
+                        }
+                    }
                 }
 
-                state.all_systems.remove(&sys_id);
+                let sorted = if thread_data.system_data.len() > 1 {
+                    let unsorted = thread_data
+                        .system_data
+                        .iter()
+                        .map(|(id, data)| Ok((id.clone(), data.read()?)))
+                        .collect::<Result<HashMap<_, _>, SystemError>>()?;
+                    let sorted = Self::sort_systems(unsorted)?;
+                    sorted
+                } else if let Some(only_system) = thread_data.system_data.keys().next() {
+                    vec![only_system.clone()]
+                } else {
+                    vec![]
+                };
+
+                thread_data.order = sorted;
             }
 
             if state.all_systems.is_empty() {

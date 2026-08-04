@@ -76,12 +76,15 @@ impl Thread131 for MainThread {
     }
 }
 
+pub(crate) enum SystemOp {
+    Create(SystemData),
+    Destroy,
+}
 pub(crate) struct EngineData {
-    system_create_queue: HashMap<SystemId, SystemData>,
-    system_destroy_queue: HashSet<SystemId>,
+    system_op_queue: HashMap<SystemId, SystemOp>,
     thread_data: HashMap<&'static str, Arc<RwLock<ThreadData>>>,
     main_thread: Arc<RwLock<ThreadData>>,
-    all_systems: HashMap<SystemId, (&'static str, usize)>,
+    all_systems: HashMap<SystemId, &'static str>,
     /// Will be incremented by each thread at the end of their ticks
     /// Engine will reset at end of frame when every thread is done
     state: EngineState,
@@ -110,8 +113,7 @@ impl I131 {
             engine: engine.clone(),
             state: (
                 Mutex::new(EngineData {
-                    system_create_queue: HashMap::new(),
-                    system_destroy_queue: HashSet::new(),
+                    system_op_queue: HashMap::new(),
                     thread_data: HashMap::new(),
                     main_thread: Arc::default(),
                     all_systems: HashMap::new(),
