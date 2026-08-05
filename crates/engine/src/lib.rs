@@ -135,8 +135,6 @@ impl I131 {
     pub fn main_loop(&self) -> Result<(), SystemError> {
         // If any init code needs to run, it should be here
 
-        let mut last = std::time::SystemTime::now();
-        let mut delta_acc = 0.0f32;
         let thread_data = {
             let mut state = self.lock()?;
             state.state = EngineState::Running;
@@ -160,13 +158,7 @@ impl I131 {
             };
             self.notify_all();
 
-            Self::run_thread_tick::<MainThread>(
-                &engine,
-                state,
-                &mut last,
-                &mut delta_acc,
-                &thread_data,
-            )?;
+            Self::run_thread_tick::<MainThread>(&engine, state, &thread_data)?;
 
             {
                 self.process_create_and_destroy_queues()?;

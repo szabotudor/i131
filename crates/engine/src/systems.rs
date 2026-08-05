@@ -96,14 +96,28 @@ impl SystemData {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct ThreadData {
     system_data: HashMap<SystemId, Arc<RwLock<SystemData>>>,
     order: Vec<SystemId>,
+    last: SystemTime,
+    delta_acc: f32,
+    /// Only `None` when used by the main thread
     join_handle: Option<JoinHandle<Result<(), SystemError>>>,
 }
 unsafe impl Sync for ThreadData {}
 unsafe impl Send for ThreadData {}
+
+impl Default for ThreadData {
+    fn default() -> Self {
+        Self {
+            system_data: HashMap::default(),
+            order: Vec::default(),
+            last: SystemTime::now(),
+            delta_acc: 0.0f32,
+            join_handle: None,
+        }
+    }
+}
 
 impl Debug for ThreadData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -230,19 +244,17 @@ impl I131 {
     pub(crate) fn run_thread_tick<ST: Thread131 + 'static>(
         engine: &Arc<I131>,
         engine_state: EngineState,
-        last: &mut SystemTime,
-        delta_acc: &mut f32,
         thread_data: &Arc<RwLock<ThreadData>>,
     ) -> Result<EngineState, SystemError> {
-        let now = std::time::SystemTime::now();
-        let delta_duration = now.duration_since(*last)?;
-        let delta = delta_duration.as_micros() as f32
-            / std::time::Duration::from_secs(1).as_micros() as f32;
-        *last = now;
+        let (systems, delta, mut delta_acc) = {
+            let mut thread_data = thread_data.write()?;
+            let now = std::time::SystemTime::now();
+            let delta_duration = now.duration_since(thread_data.last)?;
+            let delta = delta_duration.as_micros() as f32
+                / std::time::Duration::from_secs(1).as_micros() as f32;
+            thread_data.last = now;
 
-        let systems = {
-            let thread_data = thread_data.read()?;
-            thread_data
+            let systems = thread_data
                 .order
                 .iter()
                 .map(|id| {
@@ -252,7 +264,9 @@ impl I131 {
                         .cloned()
                         .ok_or_system_error(SystemError::MissingSystem(*id))
                 })
-                .collect::<Result<Vec<_>, _>>()?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            (systems, delta, thread_data.delta_acc)
         };
 
         match ST::TPS {
@@ -261,10 +275,10 @@ impl I131 {
             }
             TicksPerSecond::Prefer(prefer) => {
                 let target_delta = 1.0f32 / prefer;
-                *delta_acc += delta;
-                if *delta_acc >= target_delta {
-                    *delta_acc -= target_delta;
-                    if *delta_acc > target_delta {
+                delta_acc += delta;
+                if delta_acc >= target_delta {
+                    delta_acc -= target_delta;
+                    if delta_acc > target_delta {
                         eprintln!(
                             "Thread {} update is running {delta_acc} seconds behind.",
                             ST::NAME
@@ -272,8 +286,9 @@ impl I131 {
                     }
                     eprintln!("Ticking thread {}", ST::NAME);
                     Self::thread_tick(engine, engine_state, systems, prefer)?;
+                    thread_data.write()?.delta_acc = delta_acc;
                 } else {
-                    let wait_at_least = ((target_delta - *delta_acc)
+                    let wait_at_least = ((target_delta - delta_acc)
                         * std::time::Duration::from_secs(1).as_millis() as f32)
                         .floor();
                     let wait = std::time::Duration::from_millis(wait_at_least as u64);
@@ -308,7 +323,7 @@ impl I131 {
             let thread_id = std::thread::current().id();
             let engine = engine;
             // TODO: Add custom user update functions for the thread
-            let thread = thread;
+            let _thread = thread;
 
             let (thread_data, mut state) = {
                 // Wait until engine is running
@@ -323,19 +338,16 @@ impl I131 {
                     )))?
                     .clone();
 
+                {
+                    let mut thread_data = thread_data.write()?;
+                    thread_data.last = SystemTime::now();
+                    thread_data.delta_acc = 0.0f32;
+                }
                 (thread_data, engine_data.state)
             };
 
-            let mut last = std::time::SystemTime::now();
-            let mut delta_acc = 0.0f32;
             while state == EngineState::Running {
-                state = Self::run_thread_tick::<ST>(
-                    &engine,
-                    state,
-                    &mut last,
-                    &mut delta_acc,
-                    &thread_data,
-                )?;
+                state = Self::run_thread_tick::<ST>(&engine, state, &thread_data)?;
             }
 
             Ok(())
@@ -346,6 +358,8 @@ impl I131 {
         let thread_data = Arc::new(RwLock::new(ThreadData {
             system_data: HashMap::default(),
             order: Vec::default(),
+            last: SystemTime::now(),
+            delta_acc: 0.0f32,
             join_handle: Some(join_handle),
         }));
 
