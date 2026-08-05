@@ -45,6 +45,15 @@ pub enum SystemError {
     #[error("System time error: {0}")]
     StstemTimeError(#[from] SystemTimeError),
 
+    #[error(
+        "Thread {thread} failed to meet required TPS of {requirement}. Behind on {overtime:.0}% of ticks."
+    )]
+    TpsRequirementError {
+        thread: &'static str,
+        requirement: f32,
+        overtime: f32,
+    },
+
     #[error("Renderer error: {0}")]
     RendererError(#[from] RendererError),
 }
@@ -103,6 +112,8 @@ pub(crate) struct ThreadData {
     delta_acc: f32,
     /// Only `None` when used by the main thread
     join_handle: Option<JoinHandle<Result<(), SystemError>>>,
+    /// Smoothed fraction of ticks that run behind. Bounded 0..1, never overflows.
+    current_overtime_percent: f32,
 }
 unsafe impl Sync for ThreadData {}
 unsafe impl Send for ThreadData {}
@@ -113,8 +124,9 @@ impl Default for ThreadData {
             system_data: HashMap::default(),
             order: Vec::default(),
             last: SystemTime::now(),
-            delta_acc: 0.0f32,
+            delta_acc: 0.0,
             join_handle: None,
+            current_overtime_percent: 0.0,
         }
     }
 }
@@ -274,7 +286,7 @@ impl I131 {
                 Self::thread_tick(engine, engine_state, systems, delta)?;
             }
             TicksPerSecond::Prefer(prefer) => {
-                let target_delta = 1.0f32 / prefer;
+                let target_delta = 1.0 / prefer;
                 delta_acc += delta;
                 if delta_acc >= target_delta {
                     delta_acc -= target_delta;
@@ -299,7 +311,38 @@ impl I131 {
             TicksPerSecond::Require {
                 requirement,
                 threshold,
-            } => todo!(),
+            } => {
+                let target_delta = 1.0 / requirement;
+                delta_acc += delta;
+                if delta_acc >= target_delta {
+                    delta_acc -= target_delta;
+                    let behind = delta_acc > target_delta;
+                    {
+                        const SMALL_CHANGE: f32 = 0.0625;
+
+                        let mut thread_data = thread_data.write()?;
+                        thread_data.delta_acc = delta_acc;
+                        let target = if behind { 1.0 } else { 0.0 };
+                        thread_data.current_overtime_percent +=
+                            (target - thread_data.current_overtime_percent) * SMALL_CHANGE;
+                        if thread_data.current_overtime_percent > threshold {
+                            return Err(SystemError::TpsRequirementError {
+                                thread: ST::NAME,
+                                requirement,
+                                overtime: thread_data.current_overtime_percent * 100.0,
+                            });
+                        }
+                    }
+                    Self::thread_tick(engine, engine_state, systems, requirement)?;
+                } else {
+                    let wait_at_least = ((target_delta - delta_acc)
+                        * std::time::Duration::from_secs(1).as_millis() as f32)
+                        .floor();
+                    let wait = std::time::Duration::from_millis(wait_at_least as u64);
+                    eprintln!("Thread will wait for {}", wait.as_millis());
+                    std::thread::sleep(wait);
+                }
+            }
         }
 
         std::thread::sleep(std::time::Duration::from_millis(1));
@@ -341,7 +384,8 @@ impl I131 {
                 {
                     let mut thread_data = thread_data.write()?;
                     thread_data.last = SystemTime::now();
-                    thread_data.delta_acc = 0.0f32;
+                    thread_data.delta_acc = 0.0;
+                    thread_data.current_overtime_percent = 0.0;
                 }
                 (thread_data, engine_data.state)
             };
@@ -359,8 +403,9 @@ impl I131 {
             system_data: HashMap::default(),
             order: Vec::default(),
             last: SystemTime::now(),
-            delta_acc: 0.0f32,
+            delta_acc: 0.0,
             join_handle: Some(join_handle),
+            current_overtime_percent: 0.0,
         }));
 
         state.thread_data.insert(name, thread_data);
