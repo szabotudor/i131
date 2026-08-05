@@ -4,7 +4,7 @@ use std::{
     any::Any,
     collections::{BTreeSet, HashMap, HashSet},
     fmt::{Debug, Display},
-    sync::{Arc, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard},
+    sync::{Arc, MutexGuard, PoisonError, RwLock, RwLockReadGuard},
     thread::JoinHandle,
     time::{SystemTime, SystemTimeError},
 };
@@ -68,7 +68,6 @@ impl<T> From<PoisonError<T>> for SystemError {
 }
 
 pub(crate) struct SystemData {
-    pub(crate) last_update: SystemTime,
     pub(crate) initialized: bool,
     pub(crate) playing: bool,
     pub(crate) queued_for_destroy: bool,
@@ -84,7 +83,6 @@ unsafe impl Sync for SystemData {}
 impl SystemData {
     pub(crate) fn new<T: System + 'static>(system: T, affinity: &'static str) -> Self {
         Self {
-            last_update: SystemTime::now(),
             initialized: false,
             playing: false,
             queued_for_destroy: false,
@@ -244,7 +242,7 @@ impl I131 {
 
         let systems = {
             let thread_data = thread_data.read()?;
-            let systems = thread_data
+            thread_data
                 .order
                 .iter()
                 .map(|id| {
@@ -252,15 +250,14 @@ impl I131 {
                         .system_data
                         .get(id)
                         .cloned()
-                        .ok_or_system_error(SystemError::MissingSystem(id.clone()))
+                        .ok_or_system_error(SystemError::MissingSystem(*id))
                 })
-                .collect::<Result<Vec<_>, _>>()?;
-            systems
+                .collect::<Result<Vec<_>, _>>()?
         };
 
         match ST::TPS {
             TicksPerSecond::FullSpeed => {
-                Self::thread_tick(&engine, engine_state, systems, delta)?;
+                Self::thread_tick(engine, engine_state, systems, delta)?;
             }
             TicksPerSecond::Prefer(prefer) => {
                 let target_delta = 1.0f32 / prefer;
@@ -274,7 +271,7 @@ impl I131 {
                         );
                     }
                     eprintln!("Ticking thread {}", ST::NAME);
-                    Self::thread_tick(&engine, engine_state, systems, prefer)?;
+                    Self::thread_tick(engine, engine_state, systems, prefer)?;
                 } else {
                     let wait_at_least = ((target_delta - *delta_acc)
                         * std::time::Duration::from_secs(1).as_millis() as f32)
@@ -310,12 +307,13 @@ impl I131 {
         let thread_fn = || -> Result<(), SystemError> {
             let thread_id = std::thread::current().id();
             let engine = engine;
+            // TODO: Add custom user update functions for the thread
             let thread = thread;
 
             let (thread_data, mut state) = {
                 // Wait until engine is running
-                let engine_data = engine.wait_while(|data| {
-                    data.state != EngineState::Running || !data.thread_data.contains_key(ST::NAME)
+                let engine_data = engine.wait_until(|data| {
+                    data.state == EngineState::Running && data.thread_data.contains_key(ST::NAME)
                 })?;
                 let thread_data = engine_data
                     .thread_data
@@ -409,7 +407,7 @@ impl I131 {
             !state.all_systems.contains_key(id) || state.system_op_queue.contains_key(id)
         });
         if let Some((system_id, _)) = any_missing_system {
-            return Err(SystemError::MissingSystem(system_id.clone()));
+            return Err(SystemError::MissingSystem(*system_id));
         }
 
         state.system_op_queue.extend(system_ids);
@@ -498,7 +496,7 @@ impl I131 {
                             .cloned()
                             .ok_or_system_error(SystemError::MissingSystem(id))?,
                     };
-                    let entry = acc.entry(thread_name).or_insert_with(|| Vec::default());
+                    let entry = acc.entry(thread_name).or_insert_with(Vec::default);
 
                     entry.push((id, op));
                     Ok(acc)
@@ -539,12 +537,11 @@ impl I131 {
                     let unsorted = thread_data
                         .system_data
                         .iter()
-                        .map(|(id, data)| Ok((id.clone(), data.read()?)))
+                        .map(|(id, data)| Ok((*id, data.read()?)))
                         .collect::<Result<HashMap<_, _>, SystemError>>()?;
-                    let sorted = Self::sort_systems(unsorted)?;
-                    sorted
+                    Self::sort_systems(unsorted)?
                 } else if let Some(only_system) = thread_data.system_data.keys().next() {
-                    vec![only_system.clone()]
+                    vec![*only_system]
                 } else {
                     vec![]
                 };

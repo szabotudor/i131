@@ -6,7 +6,6 @@ use std::{
     collections::HashMap,
     marker::PhantomData,
     sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, Weak},
-    time::SystemTime,
 };
 
 pub use math131;
@@ -55,6 +54,10 @@ where
 pub struct AffinityFor<T: Thread131> {
     _marker: PhantomData<T>,
 }
+#[allow(
+    clippy::new_without_default,
+    reason = "We need const. There is nothing Default helps with here"
+)]
 impl<T: Thread131> AffinityFor<T> {
     pub const fn new() -> Self {
         Self {
