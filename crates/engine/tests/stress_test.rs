@@ -27,13 +27,13 @@ impl Thread131 for LogicThread {
 // -- System definitions --
 
 struct QuitAfter3Seconds {
-    start: Instant,
+    acc: f32,
     engine: Option<Arc<I131>>,
 }
 impl QuitAfter3Seconds {
     fn new() -> Self {
         Self {
-            start: Instant::now(),
+            acc: 0.0f32,
             engine: None,
         }
     }
@@ -46,11 +46,11 @@ impl System for QuitAfter3Seconds {
     }
     fn begin_play(&mut self, _engine: &I131) -> Result<(), SystemError> {
         println!("[QuitAfter3Seconds] begin_play");
-        self.start = Instant::now();
         Ok(())
     }
     fn update(&mut self, engine: &I131, _delta: f32) -> Result<(), SystemError> {
-        if self.start.elapsed() >= Duration::from_secs(3) {
+        self.acc += _delta;
+        if self.acc >= 3.0f32 {
             println!("[QuitAfter3Seconds] 3 seconds elapsed, requesting shutdown");
             engine.request_immediate_shutdown()?;
         }
@@ -234,7 +234,7 @@ fn stress_two_threads_four_systems_quit_after_3s() {
     // Watchdog — abort if test hangs
     let engine_for_watchdog = Arc::clone(&engine);
     let watchdog = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(10));
+        std::thread::sleep(Duration::from_secs(4));
         eprintln!("[watchdog] test hung for 10s, aborting");
         engine_for_watchdog.request_immediate_shutdown().ok();
     });

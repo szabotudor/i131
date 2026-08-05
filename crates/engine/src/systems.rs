@@ -1,4 +1,4 @@
-use crate::{AffinityFor, EngineData, EngineState, I131, SystemOp, Thread131};
+use crate::{AffinityFor, EngineData, EngineState, I131, SystemOp, Thread131, TicksPerSecond};
 use renderer131::RendererError;
 use std::{
     any::Any,
@@ -184,10 +184,12 @@ impl I131 {
     fn thread_tick(
         engine: &Arc<I131>,
         engine_state: EngineState,
-        mut systems: Vec<RwLockWriteGuard<'_, SystemData>>,
+        systems: Vec<Arc<RwLock<SystemData>>>,
+        delta: f32,
     ) -> Result<(), SystemError> {
-        while let Some(mut system_data) = systems.pop() {
+        for system in systems {
             let engine: &I131 = engine;
+            let mut system_data = system.write()?;
 
             if (engine_state == EngineState::Initialized
                 || engine_state == EngineState::InEditor
@@ -207,16 +209,8 @@ impl I131 {
             }
 
             if engine_state == EngineState::Running {
-                let now = SystemTime::now();
-                let delta_time = now.duration_since(system_data.last_update)?;
-                let delta = delta_time.as_secs_f32();
-                system_data.last_update = now;
                 system_data.system.update(engine, delta)?;
             } else if engine_state == EngineState::InEditor {
-                let now = SystemTime::now();
-                let delta_time = now.duration_since(system_data.last_update)?;
-                let delta = delta_time.as_secs_f32();
-                system_data.last_update = now;
                 system_data.system.in_editor_update(engine, delta)?;
             }
 
@@ -233,6 +227,72 @@ impl I131 {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn run_thread_tick<ST: Thread131 + 'static>(
+        engine: &Arc<I131>,
+        engine_state: EngineState,
+        last: &mut SystemTime,
+        delta_acc: &mut f32,
+        thread_data: &Arc<RwLock<ThreadData>>,
+    ) -> Result<EngineState, SystemError> {
+        let now = std::time::SystemTime::now();
+        let delta_duration = now.duration_since(*last)?;
+        let delta = delta_duration.as_micros() as f32
+            / std::time::Duration::from_secs(1).as_micros() as f32;
+        *last = now;
+
+        let systems = {
+            let thread_data = thread_data.read()?;
+            let systems = thread_data
+                .order
+                .iter()
+                .map(|id| {
+                    thread_data
+                        .system_data
+                        .get(id)
+                        .cloned()
+                        .ok_or_system_error(SystemError::MissingSystem(id.clone()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            systems
+        };
+
+        match ST::TPS {
+            TicksPerSecond::FullSpeed => {
+                Self::thread_tick(&engine, engine_state, systems, delta)?;
+            }
+            TicksPerSecond::Prefer(prefer) => {
+                let target_delta = 1.0f32 / prefer;
+                *delta_acc += delta;
+                if *delta_acc >= target_delta {
+                    *delta_acc -= target_delta;
+                    if *delta_acc > target_delta {
+                        eprintln!(
+                            "Thread {} update is running {delta_acc} seconds behind.",
+                            ST::NAME
+                        );
+                    }
+                    eprintln!("Ticking thread {}", ST::NAME);
+                    Self::thread_tick(&engine, engine_state, systems, prefer)?;
+                } else {
+                    let wait_at_least = ((target_delta - *delta_acc)
+                        * std::time::Duration::from_secs(1).as_millis() as f32)
+                        .floor();
+                    let wait = std::time::Duration::from_millis(wait_at_least as u64);
+                    eprintln!("Thread will wait for {}", wait.as_millis());
+                    std::thread::sleep(wait);
+                }
+            }
+            TicksPerSecond::Require {
+                requirement,
+                threshold,
+            } => todo!(),
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(1));
+
+        Ok(engine.lock()?.state)
     }
 
     /// Contains the thread update function too
@@ -268,8 +328,16 @@ impl I131 {
                 (thread_data, engine_data.state)
             };
 
+            let mut last = std::time::SystemTime::now();
+            let mut delta_acc = 0.0f32;
             while state == EngineState::Running {
-                state = engine.lock()?.state;
+                state = Self::run_thread_tick::<ST>(
+                    &engine,
+                    state,
+                    &mut last,
+                    &mut delta_acc,
+                    &thread_data,
+                )?;
             }
 
             Ok(())
@@ -352,8 +420,6 @@ impl I131 {
     fn sort_systems(
         systems: HashMap<SystemId, RwLockReadGuard<'_, SystemData>>,
     ) -> Result<Vec<SystemId>, SystemError> {
-        todo!("This is written by AI. me no like");
-
         let mut in_degree: HashMap<SystemId, usize> = systems.keys().map(|&id| (id, 0)).collect();
         let mut edges: HashMap<SystemId, Vec<SystemId>> =
             systems.keys().map(|&id| (id, Vec::new())).collect();

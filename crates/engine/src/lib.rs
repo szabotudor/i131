@@ -1,11 +1,12 @@
 pub mod builtin;
 pub mod systems;
 
-use crate::systems::{SystemData, SystemError, SystemId, ThreadData};
+use crate::systems::{OptionSystemError, SystemData, SystemError, SystemId, ThreadData};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     marker::PhantomData,
     sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, Weak},
+    time::SystemTime,
 };
 
 pub use math131;
@@ -27,6 +28,7 @@ pub enum EngineStage {
     EndOfTick,
 }
 
+#[derive(Debug)]
 pub enum TicksPerSecond {
     /// No TPS requirement, run as fast as possible
     FullSpeed,
@@ -130,19 +132,38 @@ impl I131 {
     pub fn main_loop(&self) -> Result<(), SystemError> {
         // If any init code needs to run, it should be here
 
-        self.lock()?.state = EngineState::Running;
+        let mut last = std::time::SystemTime::now();
+        let mut delta_acc = 0.0f32;
+        let thread_data = {
+            let mut state = self.lock()?;
+            state.state = EngineState::Running;
+            state.main_thread.clone()
+        };
+
+        let engine = self
+            .engine
+            .upgrade()
+            .ok_or_system_error(SystemError::InvalidEngine)?;
+
         loop {
-            {
+            let state = {
                 let mut lock = self.lock()?;
                 if lock.all_systems.is_empty() && lock.state == EngineState::Stopped {
                     println!("Stopping engine");
                     break;
                 }
                 lock.stage = EngineStage::Ticking;
-            }
+                lock.state
+            };
             self.notify_all();
 
-            // TODO: System updates
+            Self::run_thread_tick::<MainThread>(
+                &engine,
+                state,
+                &mut last,
+                &mut delta_acc,
+                &thread_data,
+            )?;
 
             {
                 self.process_create_and_destroy_queues()?;
