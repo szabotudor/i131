@@ -1,226 +1,267 @@
-use std::time::{Duration, SystemTime};
+use engine131::systems::{System, SystemError, SystemId};
+use engine131::{I131, Thread131, TicksPerSecond};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
-use engine131::{
-    I131,
-    schedulers::DAGScheduler,
-    systems::{System, SystemError, SystemId},
-};
+// -- Thread definitions --
 
-fn spin(n: u64) {
-    let mut x = n | 1;
-    for i in 0..n {
-        x = x.wrapping_mul(6364136223846793005).wrapping_add(i);
+struct GameThread;
+impl Thread131 for GameThread {
+    const NAME: &'static str = "Game";
+    const TPS: TicksPerSecond = TicksPerSecond::FullSpeed;
+    fn new() -> Self {
+        Self
     }
-    std::hint::black_box(x);
 }
 
-fn xorshift(state: &mut u64) -> u64 {
-    *state ^= *state << 13;
-    *state ^= *state >> 7;
-    *state ^= *state << 17;
-    *state
+struct LogicThread;
+impl Thread131 for LogicThread {
+    const NAME: &'static str = "Logic";
+    const TPS: TicksPerSecond = TicksPerSecond::Prefer(60.0);
+    fn new() -> Self {
+        Self
+    }
 }
 
-// sys0: no deps, counts frames
-struct Sys0 {
-    tick: u64,
-    rng: u64,
-}
+// -- System definitions --
 
-impl Sys0 {
+struct QuitAfter3Seconds {
+    acc: f32,
+    engine: Option<Arc<I131>>,
+}
+impl QuitAfter3Seconds {
     fn new() -> Self {
         Self {
-            tick: 0,
-            rng: 0xdeadbeef_cafebabe,
+            acc: 0.0f32,
+            engine: None,
         }
     }
 }
-
-impl System for Sys0 {
-    fn system_id() -> SystemId
-    where
-        Self: Sized,
-    {
-        SystemId("sys0")
+impl System for QuitAfter3Seconds {
+    fn initialize(&mut self, _engine: &I131) -> Result<(), SystemError> {
+        println!("[QuitAfter3Seconds] initialized");
+        self.engine = None; // Would hold Arc<I131> in real impl
+        Ok(())
     }
-    fn dependencies() -> &'static [SystemId]
-    where
-        Self: Sized,
-    {
+    fn begin_play(&mut self, _engine: &I131) -> Result<(), SystemError> {
+        println!("[QuitAfter3Seconds] begin_play");
+        Ok(())
+    }
+    fn update(&mut self, engine: &I131, _delta: f32) -> Result<(), SystemError> {
+        self.acc += _delta;
+        if self.acc >= 3.0f32 {
+            println!("[QuitAfter3Seconds] 3 seconds elapsed, requesting shutdown");
+            engine.request_immediate_shutdown()?;
+        }
+        Ok(())
+    }
+    fn in_editor_update(&mut self, _engine: &I131, _delta: f32) -> Result<(), SystemError> {
+        Ok(())
+    }
+    fn end_play(&mut self, _engine: &I131) -> Result<(), SystemError> {
+        println!("[QuitAfter3Seconds] end_play");
+        Ok(())
+    }
+    fn destroy(&mut self, _engine: &I131) -> Result<(), SystemError> {
+        println!("[QuitAfter3Seconds] destroyed");
+        Ok(())
+    }
+    fn after() -> &'static [SystemId] {
         &[]
     }
-    fn initialize(&mut self, _: &I131) -> Result<(), SystemError> {
-        Ok(())
+    fn before() -> &'static [SystemId] {
+        &[]
     }
-    fn begin_play(&mut self, _: &I131) -> Result<(), SystemError> {
-        Ok(())
-    }
-    fn update(&mut self, _: &I131, _: f32) -> Result<(), SystemError> {
-        let n = (xorshift(&mut self.rng) % 300 + 50) * 1000;
-        spin(n);
-        self.tick += 1;
-        Ok(())
-    }
-    fn in_editor_update(&mut self, e: &I131, d: f32) -> Result<(), SystemError> {
-        self.update(e, d)
-    }
-    fn end_play(&mut self, _: &I131) -> Result<(), SystemError> {
-        Ok(())
-    }
-    fn destroy(&mut self, _: &I131) -> Result<(), SystemError> {
-        Ok(())
+    fn system_id() -> SystemId {
+        SystemId("QuitAfter3Seconds")
     }
 }
 
-// sys1: deps=[sys0], must read sys0's current-frame tick
-struct Sys1 {
-    tick: u64,
-    rng: u64,
+struct GameSystemA {
+    update_count: Arc<AtomicU64>,
 }
-
-impl Sys1 {
-    fn new() -> Self {
-        Self {
-            tick: 0,
-            rng: 0xc0ffee_facade,
-        }
-    }
-}
-
-impl System for Sys1 {
-    fn system_id() -> SystemId
-    where
-        Self: Sized,
-    {
-        SystemId("sys1")
-    }
-    fn dependencies() -> &'static [SystemId]
-    where
-        Self: Sized,
-    {
-        &[SystemId("sys0")]
-    }
-    fn initialize(&mut self, _: &I131) -> Result<(), SystemError> {
+impl System for GameSystemA {
+    fn initialize(&mut self, _engine: &I131) -> Result<(), SystemError> {
+        println!("[GameSystemA] initialized");
         Ok(())
     }
-    fn begin_play(&mut self, _: &I131) -> Result<(), SystemError> {
+    fn begin_play(&mut self, _engine: &I131) -> Result<(), SystemError> {
+        println!("[GameSystemA] begin_play");
         Ok(())
     }
-    fn update(&mut self, engine: &I131, _: f32) -> Result<(), SystemError> {
-        self.tick += 1;
-
-        let sys0 = engine.system::<Sys0>(&SystemId("sys0"))?;
-        let sys0_tick = sys0.read::<Sys0>()?.tick;
-
-        // sys0 must have already run this frame: its tick must equal ours
-        assert_eq!(
-            sys0_tick, self.tick,
-            "sys1 frame {}: sys0.tick={} (expected {})",
-            self.tick, sys0_tick, self.tick
-        );
-
-        let n = (xorshift(&mut self.rng) % 300 + 50) * 1000;
-        spin(n);
+    fn update(&mut self, _engine: &I131, _delta: f32) -> Result<(), SystemError> {
+        self.update_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
-    fn in_editor_update(&mut self, e: &I131, d: f32) -> Result<(), SystemError> {
-        self.update(e, d)
-    }
-    fn end_play(&mut self, _: &I131) -> Result<(), SystemError> {
+    fn in_editor_update(&mut self, _engine: &I131, _delta: f32) -> Result<(), SystemError> {
         Ok(())
     }
-    fn destroy(&mut self, _: &I131) -> Result<(), SystemError> {
+    fn end_play(&mut self, _engine: &I131) -> Result<(), SystemError> {
+        println!("[GameSystemA] end_play");
         Ok(())
+    }
+    fn destroy(&mut self, _engine: &I131) -> Result<(), SystemError> {
+        println!("[GameSystemA] destroyed");
+        Ok(())
+    }
+    fn after() -> &'static [SystemId] {
+        &[]
+    }
+    fn before() -> &'static [SystemId] {
+        &[]
+    }
+    fn system_id() -> SystemId {
+        SystemId("GameSystemA")
     }
 }
 
-// sys2: deps=[sys0, sys1], must read both current-frame, destroys all after 10s
-struct Sys2 {
-    tick: u64,
-    rng: u64,
-    start: SystemTime,
-    done: bool,
+struct LogicSystemB {
+    update_count: Arc<AtomicU64>,
+}
+impl System for LogicSystemB {
+    fn initialize(&mut self, _engine: &I131) -> Result<(), SystemError> {
+        println!("[LogicSystemB] initialized");
+        Ok(())
+    }
+    fn begin_play(&mut self, _engine: &I131) -> Result<(), SystemError> {
+        println!("[LogicSystemB] begin_play");
+        Ok(())
+    }
+    fn update(&mut self, _engine: &I131, _delta: f32) -> Result<(), SystemError> {
+        self.update_count.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+    fn in_editor_update(&mut self, _engine: &I131, _delta: f32) -> Result<(), SystemError> {
+        Ok(())
+    }
+    fn end_play(&mut self, _engine: &I131) -> Result<(), SystemError> {
+        println!("[LogicSystemB] end_play");
+        Ok(())
+    }
+    fn destroy(&mut self, _engine: &I131) -> Result<(), SystemError> {
+        println!("[LogicSystemB] destroyed");
+        Ok(())
+    }
+    fn after() -> &'static [SystemId] {
+        &[]
+    }
+    fn before() -> &'static [SystemId] {
+        &[]
+    }
+    fn system_id() -> SystemId {
+        SystemId("LogicSystemB")
+    }
 }
 
-impl Sys2 {
-    fn new() -> Self {
-        Self {
-            tick: 0,
-            rng: 0xabad1dea_deadc0de,
-            start: SystemTime::UNIX_EPOCH,
-            done: false,
-        }
-    }
+struct LogicSystemC {
+    update_count: Arc<AtomicU64>,
 }
-
-impl System for Sys2 {
-    fn system_id() -> SystemId
-    where
-        Self: Sized,
-    {
-        SystemId("sys2")
-    }
-    fn dependencies() -> &'static [SystemId]
-    where
-        Self: Sized,
-    {
-        &[SystemId("sys0"), SystemId("sys1")]
-    }
-    fn initialize(&mut self, _: &I131) -> Result<(), SystemError> {
+impl System for LogicSystemC {
+    fn initialize(&mut self, _engine: &I131) -> Result<(), SystemError> {
+        println!("[LogicSystemC] initialized");
         Ok(())
     }
-    fn begin_play(&mut self, _: &I131) -> Result<(), SystemError> {
-        self.start = SystemTime::now();
+    fn begin_play(&mut self, _engine: &I131) -> Result<(), SystemError> {
+        println!("[LogicSystemC] begin_play");
         Ok(())
     }
-    fn update(&mut self, engine: &I131, _: f32) -> Result<(), SystemError> {
-        self.tick += 1;
-
-        let sys0 = engine.system::<Sys0>(&SystemId("sys0"))?;
-        let sys0_tick = sys0.read::<Sys0>()?.tick;
-        let sys1 = engine.system::<Sys1>(&SystemId("sys1"))?;
-        let sys1_tick = sys1.read::<Sys1>()?.tick;
-
-        assert_eq!(
-            sys0_tick, self.tick,
-            "sys2 frame {}: sys0.tick={} (expected {})",
-            self.tick, sys0_tick, self.tick
-        );
-        assert_eq!(
-            sys1_tick, self.tick,
-            "sys2 frame {}: sys1.tick={} (expected {})",
-            self.tick, sys1_tick, self.tick
-        );
-
-        let n = (xorshift(&mut self.rng) % 300 + 50) * 1000;
-        spin(n);
-
-        if !self.done && self.start.elapsed().unwrap_or(Duration::ZERO) >= Duration::from_secs(10) {
-            self.done = true;
-            engine.destroy_system(SystemId("sys2"))?;
-            engine.destroy_system(SystemId("sys1"))?;
-            engine.destroy_system(SystemId("sys0"))?;
-        }
-
+    fn update(&mut self, _engine: &I131, _delta: f32) -> Result<(), SystemError> {
+        self.update_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
-    fn in_editor_update(&mut self, e: &I131, d: f32) -> Result<(), SystemError> {
-        self.update(e, d)
-    }
-    fn end_play(&mut self, _: &I131) -> Result<(), SystemError> {
+    fn in_editor_update(&mut self, _engine: &I131, _delta: f32) -> Result<(), SystemError> {
         Ok(())
     }
-    fn destroy(&mut self, _: &I131) -> Result<(), SystemError> {
+    fn end_play(&mut self, _engine: &I131) -> Result<(), SystemError> {
+        println!("[LogicSystemC] end_play");
         Ok(())
+    }
+    fn destroy(&mut self, _engine: &I131) -> Result<(), SystemError> {
+        println!("[LogicSystemC] destroyed");
+        Ok(())
+    }
+    fn after() -> &'static [SystemId] {
+        &[]
+    }
+    fn before() -> &'static [SystemId] {
+        &[]
+    }
+    fn system_id() -> SystemId {
+        SystemId("LogicSystemC")
     }
 }
 
 #[test]
-fn stress_cross_thread_deps() {
-    let engine = I131::new(2, Box::new(DAGScheduler::new())).unwrap();
-    engine.initialize().unwrap();
-    engine.create_system(Sys0::new()).unwrap();
-    engine.create_system(Sys1::new()).unwrap();
-    engine.create_system(Sys2::new()).unwrap();
-    engine.main_loop().unwrap();
+fn stress_two_threads_four_systems_quit_after_3s() {
+    let game_updates = Arc::new(AtomicU64::new(0));
+    let logic_b_updates = Arc::new(AtomicU64::new(0));
+    let logic_c_updates = Arc::new(AtomicU64::new(0));
+
+    let engine = I131::new().expect("failed to create engine");
+
+    // GameThread (FullSpeed) — 2 systems
+    engine
+        .create_system(QuitAfter3Seconds::new(), GameThread::AFFINITY)
+        .expect("failed to create QuitAfter3Seconds on GameThread");
+    engine
+        .create_system(
+            GameSystemA {
+                update_count: Arc::clone(&game_updates),
+            },
+            GameThread::AFFINITY,
+        )
+        .expect("failed to create GameSystemA on GameThread");
+
+    // LogicThread (60 FPS) — 2 systems
+    engine
+        .create_system(
+            LogicSystemB {
+                update_count: Arc::clone(&logic_b_updates),
+            },
+            LogicThread::AFFINITY,
+        )
+        .expect("failed to create LogicSystemB on LogicThread");
+    engine
+        .create_system(
+            LogicSystemC {
+                update_count: Arc::clone(&logic_c_updates),
+            },
+            LogicThread::AFFINITY,
+        )
+        .expect("failed to create LogicSystemC on LogicThread");
+
+    // Watchdog — abort if test hangs
+    let engine_for_watchdog = Arc::clone(&engine);
+    let watchdog = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(4));
+        eprintln!("[watchdog] test hung for 10s, aborting");
+        engine_for_watchdog.request_immediate_shutdown().ok();
+    });
+
+    // Run — QuitAfter3Seconds will call request_immediate_shutdown after 3s
+    let start = Instant::now();
+    engine.main_loop().expect("main_loop returned error");
+    let elapsed = start.elapsed();
+
+    watchdog.join().expect("watchdog panicked");
+
+    println!(
+        "test completed in {:.2}s | GameSystemA updates: {} | LogicSystemB updates: {} | LogicSystemC updates: {}",
+        elapsed.as_secs_f64(),
+        game_updates.load(Ordering::Relaxed),
+        logic_b_updates.load(Ordering::Relaxed),
+        logic_c_updates.load(Ordering::Relaxed),
+    );
+
+    assert!(
+        elapsed >= Duration::from_secs(3),
+        "engine shut down too early: {:?}",
+        elapsed
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "engine did not shut down in time (watchdog should have fired): {:?}",
+        elapsed
+    );
 }
