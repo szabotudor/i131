@@ -1,10 +1,10 @@
 use crate::{AffinityFor, EngineData, EngineState, I131, SystemOp, Thread131, TicksPerSecond};
 use renderer131::RendererError;
 use std::{
-    any::Any,
-    collections::{BTreeSet, HashMap, HashSet},
+    any::{Any, type_name},
+    collections::{HashMap, HashSet},
     fmt::{Debug, Display},
-    sync::{Arc, MutexGuard, PoisonError, RwLock, RwLockReadGuard},
+    sync::{Arc, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard},
     thread::JoinHandle,
     time::{SystemTime, SystemTimeError},
 };
@@ -35,6 +35,14 @@ pub enum SystemError {
 
     #[error("Issue encountered in system thread: {0:?}")]
     SystemThreadError(String),
+
+    #[error(
+        "System \"{0}\" tried requesting a second context. Only one context is allowed per system"
+    )]
+    DoubleSystemContext(SystemId),
+
+    #[error("Tried writing to system \"{0}\" that was borrowed as read-only")]
+    MutError(SystemId),
 
     #[error("Arc error: {0}")]
     ArcError(String),
@@ -82,6 +90,7 @@ pub(crate) struct SystemData {
     pub(crate) queued_for_destroy: bool,
     pub(crate) destroyed: bool,
     pub(crate) system: Box<dyn SystemInterface>,
+    pub(crate) system_id: SystemId,
     pub(crate) after: &'static [SystemId],
     pub(crate) before: &'static [SystemId],
     pub(crate) dependencies: &'static [SystemId],
@@ -97,11 +106,22 @@ impl SystemData {
             queued_for_destroy: false,
             destroyed: false,
             system: Box::new(system),
+            system_id: T::SYSTEM_ID,
             after: T::AFTER,
             before: T::BEFORE,
             dependencies: T::DEPENDENCIES,
             affinity,
         }
+    }
+
+    pub(crate) fn request_context(&self, engine: Arc<I131>) -> Result<SystemContext, SystemError> {
+        if self.initialized {
+            return Err(SystemError::DoubleSystemContext(self.system_id));
+        }
+
+        Ok(SystemContext {
+            engine: Some(engine),
+        })
     }
 }
 
@@ -165,67 +185,67 @@ where
     ///
     /// Only called when the game or editor are opened,
     /// after all dependencies are already successfully initialized.
-    fn initialize(&mut self, engine: &I131) -> Result<(), SystemError>;
+    fn initialize(&mut self, context: SystemContext) -> Result<(), SystemError>;
 
     /// Begin play for this system.
     ///
     /// Called when the game begins. Might be called multiple times in the editor.
     /// Each time the game is ran from the editor, this is called.
-    fn begin_play(&mut self, engine: &I131) -> Result<(), SystemError>;
+    fn begin_play(&mut self) -> Result<(), SystemError>;
 
     /// Called every frame while the game is playing.
-    fn update(&mut self, engine: &I131, delta: f32) -> Result<(), SystemError>;
+    fn update(&mut self, delta: f32) -> Result<(), SystemError>;
 
     /// Called every frame while in the editor.
-    fn in_editor_update(&mut self, engine: &I131, delta: f32) -> Result<(), SystemError>;
+    fn in_editor_update(&mut self, delta: f32) -> Result<(), SystemError>;
 
     /// End play for this system.
     ///
     /// Caled when the game ends. Might be called multiple times in the editor.
     /// Each time the game is stopped in the editor, this is called.
-    fn end_play(&mut self, engine: &I131) -> Result<(), SystemError>;
+    fn end_play(&mut self) -> Result<(), SystemError>;
 
     /// Destroy the system.
     ///
     /// Only called when the game or editor are exited,
-    fn destroy(&mut self, engine: &I131) -> Result<(), SystemError>;
+    fn destroy(&mut self) -> Result<(), SystemError>;
 }
 
 pub(crate) trait SystemInterface
 where
     Self: Any,
 {
-    fn initialize(&mut self, engine: &I131) -> Result<(), SystemError>;
-    fn begin_play(&mut self, engine: &I131) -> Result<(), SystemError>;
-    fn update(&mut self, engine: &I131, delta: f32) -> Result<(), SystemError>;
-    fn in_editor_update(&mut self, engine: &I131, delta: f32) -> Result<(), SystemError>;
-    fn end_play(&mut self, engine: &I131) -> Result<(), SystemError>;
-    fn destroy(&mut self, engine: &I131) -> Result<(), SystemError>;
+    fn initialize(&mut self, context: SystemContext) -> Result<(), SystemError>;
+    fn begin_play(&mut self) -> Result<(), SystemError>;
+    fn update(&mut self, delta: f32) -> Result<(), SystemError>;
+    fn in_editor_update(&mut self, delta: f32) -> Result<(), SystemError>;
+    fn end_play(&mut self) -> Result<(), SystemError>;
+    fn destroy(&mut self) -> Result<(), SystemError>;
 }
 
 impl<T: System> SystemInterface for T {
-    fn initialize(&mut self, engine: &I131) -> Result<(), SystemError> {
-        self.initialize(engine)
+    fn initialize(&mut self, context: SystemContext) -> Result<(), SystemError> {
+        self.initialize(context)
     }
 
-    fn begin_play(&mut self, engine: &I131) -> Result<(), SystemError> {
-        self.begin_play(engine)
+    fn begin_play(&mut self) -> Result<(), SystemError> {
+        self.begin_play()
     }
 
-    fn update(&mut self, engine: &I131, delta: f32) -> Result<(), SystemError> {
-        self.update(engine, delta)
+    fn update(&mut self, delta: f32) -> Result<(), SystemError> {
+        self.update(delta)
     }
 
-    fn in_editor_update(&mut self, engine: &I131, delta: f32) -> Result<(), SystemError> {
-        self.in_editor_update(engine, delta)
+    fn in_editor_update(&mut self, delta: f32) -> Result<(), SystemError> {
+        self.in_editor_update(delta)
     }
 
-    fn end_play(&mut self, engine: &I131) -> Result<(), SystemError> {
-        self.end_play(engine)
+    fn end_play(&mut self) -> Result<(), SystemError> {
+        self.end_play()
     }
 
-    fn destroy(&mut self, engine: &I131) -> Result<(), SystemError> {
-        self.destroy(engine)
+    fn destroy(&mut self) -> Result<(), SystemError> {
+        self.destroy()
     }
 }
 
@@ -238,6 +258,166 @@ impl dyn SystemInterface {
     }
 }
 
+pub struct SystemContext {
+    engine: Option<Arc<I131>>,
+}
+impl SystemContext {
+    pub fn empty() -> Self {
+        Self { engine: None }
+    }
+    pub fn engine(&self) -> Result<&I131, SystemError> {
+        Ok(self
+            .engine
+            .as_ref()
+            .ok_or_system_error(SystemError::InvalidEngine)?)
+    }
+    pub fn lock_request(&mut self) -> LockRequest<'_> {
+        LockRequest {
+            context: self,
+            systems: HashMap::default(),
+        }
+    }
+}
+
+enum RequestAccess {
+    Read,
+    Write,
+}
+pub struct LockRequest<'a> {
+    context: &'a mut SystemContext,
+    systems: HashMap<SystemId, RequestAccess>,
+}
+impl<'a> LockRequest<'a> {
+    pub fn read<T: System>(mut self) -> Result<Self, SystemError> {
+        if self
+            .systems
+            .insert(T::SYSTEM_ID, RequestAccess::Read)
+            .is_some()
+        {
+            return Err(SystemError::SystemAlreadyExists(T::SYSTEM_ID));
+        }
+
+        Ok(self)
+    }
+    pub fn write<T: System>(mut self) -> Result<Self, SystemError> {
+        if self
+            .systems
+            .insert(T::SYSTEM_ID, RequestAccess::Write)
+            .is_some()
+        {
+            return Err(SystemError::SystemAlreadyExists(T::SYSTEM_ID));
+        }
+
+        Ok(self)
+    }
+
+    pub fn acquire(self) -> Result<LockedSet<'a>, SystemError> {
+        let systems = {
+            let state = self.context.engine()?.lock()?;
+            state
+                .lock_order
+                .iter()
+                .filter_map(|id| {
+                    if let Some(access) = self.systems.get(id) {
+                        state
+                            .all_systems
+                            .get(id)
+                            .map(|(_, data)| (*id, data.clone(), access))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut entries = HashMap::default();
+        for (id, data, access) in systems {
+            // Borrow erasure should be safe because we keep a copy of the Arc, so it shouldn't
+            // destroy the RwLock before we destroy the guard
+            match access {
+                RequestAccess::Read => {
+                    let erased_entry = unsafe {
+                        std::mem::transmute::<_, RwLockReadGuard<'a, SystemData>>(data.read()?)
+                    };
+                    entries.insert(id, LockedSystemEntry::Read(data, erased_entry));
+                }
+                RequestAccess::Write => {
+                    let erased_entry = unsafe {
+                        std::mem::transmute::<_, RwLockWriteGuard<'a, SystemData>>(data.write()?)
+                    };
+                    entries.insert(id, LockedSystemEntry::Write(data, erased_entry));
+                }
+            }
+        }
+
+        Ok(LockedSet {
+            _context: self.context,
+            entries,
+        })
+    }
+}
+
+enum LockedSystemEntry<'a> {
+    #[expect(
+        dead_code,
+        reason = "Only kept for safety, system shouldn't be dropped while the guard still holds a reference to it"
+    )]
+    Read(Arc<RwLock<SystemData>>, RwLockReadGuard<'a, SystemData>),
+    #[expect(
+        dead_code,
+        reason = "Only kept for safety, system shouldn't be dropped while the guard still holds a reference to it"
+    )]
+    Write(Arc<RwLock<SystemData>>, RwLockWriteGuard<'a, SystemData>),
+}
+pub struct LockedSet<'a> {
+    _context: &'a mut SystemContext,
+    entries: HashMap<SystemId, LockedSystemEntry<'a>>,
+}
+impl<'a> LockedSet<'a> {
+    pub fn get<T: System>(&self) -> Result<&T, SystemError> {
+        let system = self
+            .entries
+            .get(&T::SYSTEM_ID)
+            .ok_or_system_error(SystemError::MissingSystem(T::SYSTEM_ID))?;
+
+        match system {
+            LockedSystemEntry::Read(_, data) => {
+                data.system
+                    .downcast_ref()
+                    .ok_or_system_error(SystemError::WrongSystemType(
+                        data.system_id,
+                        type_name::<T>(),
+                    ))
+            }
+            LockedSystemEntry::Write(_, data) => {
+                data.system
+                    .downcast_ref()
+                    .ok_or_system_error(SystemError::WrongSystemType(
+                        data.system_id,
+                        type_name::<T>(),
+                    ))
+            }
+        }
+    }
+
+    pub fn get_mut<T: System>(&mut self) -> Result<&mut T, SystemError> {
+        let system = self
+            .entries
+            .get_mut(&T::SYSTEM_ID)
+            .ok_or_system_error(SystemError::MissingSystem(T::SYSTEM_ID))?;
+
+        match system {
+            LockedSystemEntry::Read(_, data) => Err(SystemError::MutError(data.system_id)),
+            LockedSystemEntry::Write(_, data) => {
+                let id = data.system_id;
+                data.system
+                    .downcast_mut()
+                    .ok_or_system_error(SystemError::WrongSystemType(id, type_name::<T>()))
+            }
+        }
+    }
+}
+
 impl I131 {
     fn thread_tick(
         engine: &Arc<I131>,
@@ -246,7 +426,6 @@ impl I131 {
         delta: f32,
     ) -> Result<(), SystemError> {
         for system in systems {
-            let engine: &I131 = engine;
             let mut system_data = system.write()?;
 
             if (engine_state == EngineState::Initialized
@@ -254,31 +433,32 @@ impl I131 {
                 || engine_state == EngineState::Running)
                 && !system_data.initialized
             {
-                system_data.system.initialize(engine)?;
+                let context = system_data.request_context(engine.clone())?;
+                system_data.system.initialize(context)?;
                 system_data.initialized = true;
             }
 
             if engine_state == EngineState::Running && !system_data.playing {
-                system_data.system.begin_play(engine)?;
+                system_data.system.begin_play()?;
                 system_data.playing = true;
             } else if engine_state != EngineState::Running && system_data.playing {
-                system_data.system.end_play(engine)?;
+                system_data.system.end_play()?;
                 system_data.playing = false;
             }
 
             if engine_state == EngineState::Running {
-                system_data.system.update(engine, delta)?;
+                system_data.system.update(delta)?;
             } else if engine_state == EngineState::InEditor {
-                system_data.system.in_editor_update(engine, delta)?;
+                system_data.system.in_editor_update(delta)?;
             }
 
             if engine_state == EngineState::Stopped || system_data.queued_for_destroy {
                 if system_data.playing {
-                    system_data.system.end_play(engine)?;
+                    system_data.system.end_play()?;
                     system_data.playing = false;
                 }
                 if system_data.initialized {
-                    system_data.system.destroy(engine)?;
+                    system_data.system.destroy()?;
                     system_data.initialized = false;
                 }
             }
@@ -682,11 +862,11 @@ impl I131 {
 
             if !system_data.destroyed {
                 if system_data.playing {
-                    system_data.system.end_play(self)?;
+                    system_data.system.end_play()?;
                     system_data.playing = false;
                 }
                 if system_data.initialized {
-                    system_data.system.destroy(self)?;
+                    system_data.system.destroy()?;
                     system_data.initialized = false;
                 }
 
@@ -695,9 +875,5 @@ impl I131 {
         }
 
         Ok(())
-    }
-
-    pub fn system<T: System + 'static>(&self, system_id: &SystemId) -> Result<&T, SystemError> {
-        todo!()
     }
 }

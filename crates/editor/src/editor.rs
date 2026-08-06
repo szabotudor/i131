@@ -3,7 +3,7 @@ use engine131::{
     renderer131::{
         ProgramHandle, Renderer, RendererError, ShaderCreateInfo, ShaderHandle, ShaderStage,
     },
-    systems::{System, SystemId},
+    systems::{System, SystemContext, SystemId},
     window131::{Window, WindowError, WindowMode, WindowSettings},
 };
 use thiserror::Error;
@@ -21,6 +21,7 @@ pub enum EditorError {
 }
 
 pub(crate) struct Editor {
+    context: SystemContext,
     renderer: Box<dyn Renderer>,
     window: Window,
     vert: ShaderHandle,
@@ -49,6 +50,7 @@ impl Editor {
         )?;
 
         Ok(Self {
+            context: SystemContext::empty(),
             window,
             renderer: Box::new(renderer),
             vert: ShaderHandle::null(),
@@ -66,9 +68,9 @@ impl System for Editor {
 
     fn initialize(
         &mut self,
-        engine: &engine131::I131,
+        context: SystemContext,
     ) -> Result<(), engine131::systems::SystemError> {
-        let _ = engine;
+        self.context = context;
 
         let default_vert = self.renderer.create_shader(ShaderCreateInfo {
             source: shaders_vulkan::DEFAULT_VERT,
@@ -93,20 +95,13 @@ impl System for Editor {
         Ok(())
     }
 
-    fn begin_play(
-        &mut self,
-        engine: &engine131::I131,
-    ) -> Result<(), engine131::systems::SystemError> {
-        let _ = engine;
+    fn begin_play(&mut self) -> Result<(), engine131::systems::SystemError> {
         Ok(())
     }
 
-    fn update(
-        &mut self,
-        engine: &engine131::I131,
-        delta: f32,
-    ) -> Result<(), engine131::systems::SystemError> {
-        let _ = (engine, delta);
+    fn update(&mut self, delta: f32) -> Result<(), engine131::systems::SystemError> {
+        let _ = delta;
+        let engine = self.context.engine()?;
 
         self.renderer.execute(self.prog)?;
 
@@ -119,12 +114,9 @@ impl System for Editor {
         Ok(())
     }
 
-    fn in_editor_update(
-        &mut self,
-        engine: &engine131::I131,
-        delta: f32,
-    ) -> Result<(), engine131::systems::SystemError> {
-        let _ = (engine, delta);
+    fn in_editor_update(&mut self, delta: f32) -> Result<(), engine131::systems::SystemError> {
+        let _ = delta;
+        let engine = self.context.engine()?;
 
         self.window.update();
 
@@ -135,17 +127,11 @@ impl System for Editor {
         Ok(())
     }
 
-    fn end_play(
-        &mut self,
-        engine: &engine131::I131,
-    ) -> Result<(), engine131::systems::SystemError> {
-        let _ = engine;
+    fn end_play(&mut self) -> Result<(), engine131::systems::SystemError> {
         Ok(())
     }
 
-    fn destroy(&mut self, engine: &engine131::I131) -> Result<(), engine131::systems::SystemError> {
-        let _ = engine;
-
+    fn destroy(&mut self) -> Result<(), engine131::systems::SystemError> {
         self.renderer.destroy()?;
         self.vert = ShaderHandle::null();
         self.frag = ShaderHandle::null();
