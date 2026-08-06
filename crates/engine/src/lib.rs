@@ -89,7 +89,8 @@ pub(crate) struct EngineData {
     system_op_queue: HashMap<SystemId, SystemOp>,
     thread_data: HashMap<&'static str, Arc<RwLock<ThreadData>>>,
     main_thread: Arc<RwLock<ThreadData>>,
-    all_systems: HashMap<SystemId, &'static str>,
+    all_systems: HashMap<SystemId, (&'static str, Arc<RwLock<SystemData>>)>,
+    lock_order: Vec<SystemId>,
     /// Will be incremented by each thread at the end of their ticks
     /// Engine will reset at end of frame when every thread is done
     state: EngineState,
@@ -122,6 +123,7 @@ impl I131 {
                     thread_data: HashMap::new(),
                     main_thread: Arc::default(),
                     all_systems: HashMap::new(),
+                    lock_order: Vec::default(),
                     state: EngineState::default(),
                     stage: EngineStage::Ticking,
                 }),

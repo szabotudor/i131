@@ -1,7 +1,7 @@
 use engine131::systems::{System, SystemError, SystemId};
-use engine131::{I131, Thread131, TicksPerSecond};
+use engine131::{I131, MainThread, Thread131, TicksPerSecond};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 // -- Thread definitions --
@@ -9,15 +9,6 @@ use std::time::{Duration, Instant};
 struct GameThread;
 impl Thread131 for GameThread {
     const NAME: &'static str = "Game";
-    const TPS: TicksPerSecond = TicksPerSecond::FullSpeed;
-    fn new() -> Self {
-        Self
-    }
-}
-
-struct LogicThread;
-impl Thread131 for LogicThread {
-    const NAME: &'static str = "Logic";
     const TPS: TicksPerSecond = TicksPerSecond::Prefer(60.0);
     fn new() -> Self {
         Self
@@ -27,21 +18,29 @@ impl Thread131 for LogicThread {
 // -- System definitions --
 
 struct QuitAfter3Seconds {
+    once: bool,
     acc: f32,
-    engine: Option<Arc<I131>>,
+    update_count: Arc<AtomicU64>,
+    success: Arc<AtomicBool>,
 }
 impl QuitAfter3Seconds {
-    fn new() -> Self {
+    fn new(update_count: Arc<AtomicU64>, success: Arc<AtomicBool>) -> Self {
         Self {
+            once: false,
             acc: 0.0f32,
-            engine: None,
+            update_count,
+            success,
         }
     }
 }
 impl System for QuitAfter3Seconds {
+    const SYSTEM_ID: SystemId = SystemId("QuitAfter3Seconds");
+    const DEPENDENCIES: &'static [SystemId] = &[GameSystemA::SYSTEM_ID, LogicSystemB::SYSTEM_ID];
+    const BEFORE: &'static [SystemId] = &[GameSystemA::SYSTEM_ID];
+    const AFTER: &'static [SystemId] = &[];
+
     fn initialize(&mut self, _engine: &I131) -> Result<(), SystemError> {
         println!("[QuitAfter3Seconds] initialized");
-        self.engine = None; // Would hold Arc<I131> in real impl
         Ok(())
     }
     fn begin_play(&mut self, _engine: &I131) -> Result<(), SystemError> {
@@ -50,10 +49,18 @@ impl System for QuitAfter3Seconds {
     }
     fn update(&mut self, engine: &I131, _delta: f32) -> Result<(), SystemError> {
         self.acc += _delta;
-        if self.acc >= 3.0f32 {
+        if self.acc >= 1.5 && !self.once {
+            println!(
+                "[QuitAfter3Seconds] 1.5 seconds elapsed, talking to GameSystemA and LogicSystemB"
+            );
+            self.once = true;
+        }
+        if self.acc >= 3.0 {
             println!("[QuitAfter3Seconds] 3 seconds elapsed, requesting shutdown");
             engine.request_immediate_shutdown()?;
+            self.success.store(true, Ordering::Relaxed);
         }
+        self.update_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
     fn in_editor_update(&mut self, _engine: &I131, _delta: f32) -> Result<(), SystemError> {
@@ -67,21 +74,17 @@ impl System for QuitAfter3Seconds {
         println!("[QuitAfter3Seconds] destroyed");
         Ok(())
     }
-    fn after() -> &'static [SystemId] {
-        &[]
-    }
-    fn before() -> &'static [SystemId] {
-        &[]
-    }
-    fn system_id() -> SystemId {
-        SystemId("QuitAfter3Seconds")
-    }
 }
 
 struct GameSystemA {
     update_count: Arc<AtomicU64>,
 }
 impl System for GameSystemA {
+    const SYSTEM_ID: SystemId = SystemId("GameSystemA");
+    const DEPENDENCIES: &'static [SystemId] = &[LogicSystemB::SYSTEM_ID];
+    const BEFORE: &'static [SystemId] = &[];
+    const AFTER: &'static [SystemId] = &[];
+
     fn initialize(&mut self, _engine: &I131) -> Result<(), SystemError> {
         println!("[GameSystemA] initialized");
         Ok(())
@@ -105,21 +108,17 @@ impl System for GameSystemA {
         println!("[GameSystemA] destroyed");
         Ok(())
     }
-    fn after() -> &'static [SystemId] {
-        &[]
-    }
-    fn before() -> &'static [SystemId] {
-        &[]
-    }
-    fn system_id() -> SystemId {
-        SystemId("GameSystemA")
-    }
 }
 
 struct LogicSystemB {
     update_count: Arc<AtomicU64>,
 }
 impl System for LogicSystemB {
+    const SYSTEM_ID: SystemId = SystemId("LogicSystemB");
+    const DEPENDENCIES: &'static [SystemId] = &[];
+    const BEFORE: &'static [SystemId] = &[LogicSystemC::SYSTEM_ID, GameSystemA::SYSTEM_ID];
+    const AFTER: &'static [SystemId] = &[];
+
     fn initialize(&mut self, _engine: &I131) -> Result<(), SystemError> {
         println!("[LogicSystemB] initialized");
         Ok(())
@@ -143,21 +142,17 @@ impl System for LogicSystemB {
         println!("[LogicSystemB] destroyed");
         Ok(())
     }
-    fn after() -> &'static [SystemId] {
-        &[]
-    }
-    fn before() -> &'static [SystemId] {
-        &[]
-    }
-    fn system_id() -> SystemId {
-        SystemId("LogicSystemB")
-    }
 }
 
 struct LogicSystemC {
     update_count: Arc<AtomicU64>,
 }
 impl System for LogicSystemC {
+    const SYSTEM_ID: SystemId = SystemId("LogicSystemC");
+    const DEPENDENCIES: &'static [SystemId] = &[LogicSystemB::SYSTEM_ID];
+    const BEFORE: &'static [SystemId] = &[];
+    const AFTER: &'static [SystemId] = &[LogicSystemB::SYSTEM_ID];
+
     fn initialize(&mut self, _engine: &I131) -> Result<(), SystemError> {
         println!("[LogicSystemC] initialized");
         Ok(())
@@ -181,35 +176,32 @@ impl System for LogicSystemC {
         println!("[LogicSystemC] destroyed");
         Ok(())
     }
-    fn after() -> &'static [SystemId] {
-        &[]
-    }
-    fn before() -> &'static [SystemId] {
-        &[]
-    }
-    fn system_id() -> SystemId {
-        SystemId("LogicSystemC")
-    }
 }
 
 #[test]
 fn stress_two_threads_four_systems_quit_after_3s() {
+    let quit_updates = Arc::new(AtomicU64::new(0));
     let game_updates = Arc::new(AtomicU64::new(0));
     let logic_b_updates = Arc::new(AtomicU64::new(0));
     let logic_c_updates = Arc::new(AtomicU64::new(0));
+
+    let success = Arc::new(AtomicBool::new(false));
 
     let engine = I131::new().expect("failed to create engine");
 
     // GameThread (FullSpeed) — 2 systems
     engine
-        .create_system(QuitAfter3Seconds::new(), GameThread::AFFINITY)
+        .create_system(
+            QuitAfter3Seconds::new(quit_updates.clone(), success.clone()),
+            MainThread::AFFINITY,
+        )
         .expect("failed to create QuitAfter3Seconds on GameThread");
     engine
         .create_system(
             GameSystemA {
                 update_count: Arc::clone(&game_updates),
             },
-            GameThread::AFFINITY,
+            MainThread::AFFINITY,
         )
         .expect("failed to create GameSystemA on GameThread");
 
@@ -219,7 +211,7 @@ fn stress_two_threads_four_systems_quit_after_3s() {
             LogicSystemB {
                 update_count: Arc::clone(&logic_b_updates),
             },
-            LogicThread::AFFINITY,
+            GameThread::AFFINITY,
         )
         .expect("failed to create LogicSystemB on LogicThread");
     engine
@@ -227,7 +219,7 @@ fn stress_two_threads_four_systems_quit_after_3s() {
             LogicSystemC {
                 update_count: Arc::clone(&logic_c_updates),
             },
-            LogicThread::AFFINITY,
+            GameThread::AFFINITY,
         )
         .expect("failed to create LogicSystemC on LogicThread");
 
@@ -235,6 +227,9 @@ fn stress_two_threads_four_systems_quit_after_3s() {
     let engine_for_watchdog = Arc::clone(&engine);
     let watchdog = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(4));
+        if success.load(Ordering::Relaxed) {
+            return;
+        }
         eprintln!("[watchdog] test hung for 10s, aborting");
         engine_for_watchdog.request_immediate_shutdown().ok();
     });
@@ -247,8 +242,9 @@ fn stress_two_threads_four_systems_quit_after_3s() {
     watchdog.join().expect("watchdog panicked");
 
     println!(
-        "test completed in {:.2}s | GameSystemA updates: {} | LogicSystemB updates: {} | LogicSystemC updates: {}",
+        "test completed in {:.2}s| QuitAfter3Seconds updates: {} | GameSystemA updates: {} | LogicSystemB updates: {} | LogicSystemC updates: {}",
         elapsed.as_secs_f64(),
+        quit_updates.load(Ordering::Relaxed),
         game_updates.load(Ordering::Relaxed),
         logic_b_updates.load(Ordering::Relaxed),
         logic_c_updates.load(Ordering::Relaxed),

@@ -81,10 +81,10 @@ pub(crate) struct SystemData {
     pub(crate) playing: bool,
     pub(crate) queued_for_destroy: bool,
     pub(crate) destroyed: bool,
-    pub(crate) system: Box<dyn System>,
+    pub(crate) system: Box<dyn SystemInterface>,
     pub(crate) after: &'static [SystemId],
     pub(crate) before: &'static [SystemId],
-    pub(crate) system_id: SystemId,
+    pub(crate) dependencies: &'static [SystemId],
     pub(crate) affinity: &'static str,
 }
 unsafe impl Send for SystemData {}
@@ -97,9 +97,9 @@ impl SystemData {
             queued_for_destroy: false,
             destroyed: false,
             system: Box::new(system),
-            after: T::after(),
-            before: T::before(),
-            system_id: T::system_id(),
+            after: T::AFTER,
+            before: T::BEFORE,
+            dependencies: T::DEPENDENCIES,
             affinity,
         }
     }
@@ -151,6 +151,16 @@ pub trait System
 where
     Self: Send + Sync + Any,
 {
+    /// This system's ID (unique identifier)
+    const SYSTEM_ID: SystemId;
+    /// List of systems that this system should be allowed to access
+    /// Cyclic dependencies are not allowed
+    const DEPENDENCIES: &'static [SystemId];
+    /// Returns list of systems on the same thread to update only after this system.
+    const BEFORE: &'static [SystemId];
+    /// Returns list of systems on the same thread to update before this system.
+    const AFTER: &'static [SystemId];
+
     /// Initialize the system.
     ///
     /// Only called when the game or editor are opened,
@@ -179,27 +189,51 @@ where
     ///
     /// Only called when the game or editor are exited,
     fn destroy(&mut self, engine: &I131) -> Result<(), SystemError>;
-
-    /// Returns list of systems on the same thread to update before this system.
-    fn after() -> &'static [SystemId]
-    where
-        Self: Sized;
-    /// Returns list of systems on the same thread to update only after this system.
-    fn before() -> &'static [SystemId]
-    where
-        Self: Sized;
-
-    /// This system's ID (unique identifier)
-    fn system_id() -> SystemId
-    where
-        Self: Sized;
 }
 
-impl dyn System {
-    pub fn downcast_ref<T: System + 'static>(&self) -> Option<&T> {
+pub(crate) trait SystemInterface
+where
+    Self: Any,
+{
+    fn initialize(&mut self, engine: &I131) -> Result<(), SystemError>;
+    fn begin_play(&mut self, engine: &I131) -> Result<(), SystemError>;
+    fn update(&mut self, engine: &I131, delta: f32) -> Result<(), SystemError>;
+    fn in_editor_update(&mut self, engine: &I131, delta: f32) -> Result<(), SystemError>;
+    fn end_play(&mut self, engine: &I131) -> Result<(), SystemError>;
+    fn destroy(&mut self, engine: &I131) -> Result<(), SystemError>;
+}
+
+impl<T: System> SystemInterface for T {
+    fn initialize(&mut self, engine: &I131) -> Result<(), SystemError> {
+        self.initialize(engine)
+    }
+
+    fn begin_play(&mut self, engine: &I131) -> Result<(), SystemError> {
+        self.begin_play(engine)
+    }
+
+    fn update(&mut self, engine: &I131, delta: f32) -> Result<(), SystemError> {
+        self.update(engine, delta)
+    }
+
+    fn in_editor_update(&mut self, engine: &I131, delta: f32) -> Result<(), SystemError> {
+        self.in_editor_update(engine, delta)
+    }
+
+    fn end_play(&mut self, engine: &I131) -> Result<(), SystemError> {
+        self.end_play(engine)
+    }
+
+    fn destroy(&mut self, engine: &I131) -> Result<(), SystemError> {
+        self.destroy(engine)
+    }
+}
+
+impl dyn SystemInterface {
+    pub fn downcast_ref<T: SystemInterface + 'static>(&self) -> Option<&T> {
         (self as &dyn Any).downcast_ref()
     }
-    pub fn downcast_mut<T: System + 'static>(&mut self) -> Option<&mut T> {
+    pub fn downcast_mut<T: SystemInterface + 'static>(&mut self) -> Option<&mut T> {
         (self as &mut dyn Any).downcast_mut()
     }
 }
@@ -296,17 +330,18 @@ impl I131 {
                             ST::NAME
                         );
                     }
-                    eprintln!("Ticking thread {}", ST::NAME);
                     Self::thread_tick(engine, engine_state, systems, prefer)?;
-                    thread_data.write()?.delta_acc = delta_acc;
                 } else {
                     let wait_at_least = ((target_delta - delta_acc)
                         * std::time::Duration::from_secs(1).as_millis() as f32)
                         .floor();
                     let wait = std::time::Duration::from_millis(wait_at_least as u64);
-                    eprintln!("Thread will wait for {}", wait.as_millis());
-                    std::thread::sleep(wait);
+                    let millis = wait.as_millis();
+                    if millis > 0 {
+                        std::thread::sleep(wait);
+                    }
                 }
+                thread_data.write()?.delta_acc = delta_acc;
             }
             TicksPerSecond::Require {
                 requirement,
@@ -339,7 +374,6 @@ impl I131 {
                         * std::time::Duration::from_secs(1).as_millis() as f32)
                         .floor();
                     let wait = std::time::Duration::from_millis(wait_at_least as u64);
-                    eprintln!("Thread will wait for {}", wait.as_millis());
                     std::thread::sleep(wait);
                 }
             }
@@ -426,15 +460,15 @@ impl I131 {
 
         let system_data = SystemData::new(system, ST::NAME);
 
-        if state.system_op_queue.contains_key(&T::system_id())
-            || state.all_systems.contains_key(&T::system_id())
+        if state.system_op_queue.contains_key(&T::SYSTEM_ID)
+            || state.all_systems.contains_key(&T::SYSTEM_ID)
         {
-            return Err(SystemError::SystemAlreadyExists(T::system_id()));
+            return Err(SystemError::SystemAlreadyExists(T::SYSTEM_ID));
         }
 
         state
             .system_op_queue
-            .insert(T::system_id(), SystemOp::Create(system_data));
+            .insert(T::SYSTEM_ID, SystemOp::Create(system_data));
 
         Ok(())
     }
@@ -477,62 +511,80 @@ impl I131 {
     fn sort_systems(
         systems: HashMap<SystemId, RwLockReadGuard<'_, SystemData>>,
     ) -> Result<Vec<SystemId>, SystemError> {
-        let mut in_degree: HashMap<SystemId, usize> = systems.keys().map(|&id| (id, 0)).collect();
-        let mut edges: HashMap<SystemId, Vec<SystemId>> =
-            systems.keys().map(|&id| (id, Vec::new())).collect();
+        let mut dependencies = HashMap::<SystemId, Vec<SystemId>>::default();
 
-        for (&id, data) in &systems {
-            let after = data
-                .after
-                .iter()
-                .filter(|dep| systems.contains_key(dep))
-                .collect::<Vec<_>>();
-            let before = data
-                .before
-                .iter()
-                .filter(|dep| systems.contains_key(dep))
-                .collect::<Vec<_>>();
-
-            for &dependency in after {
-                edges.get_mut(&dependency).unwrap().push(id);
-                *in_degree.get_mut(&id).unwrap() += 1;
-            }
-            for &dependent in before {
-                edges.get_mut(&id).unwrap().push(dependent);
-                *in_degree.get_mut(&dependent).unwrap() += 1;
+        for (id, data) in systems {
+            dependencies.entry(id).or_default().extend(data.before);
+            for sys in data.after {
+                dependencies.entry(*sys).or_default().push(id);
             }
         }
 
-        let mut ready: BTreeSet<SystemId> = in_degree
+        let order = Self::create_lock_order(dependencies, true)?;
+
+        Ok(order)
+    }
+    fn create_lock_order(
+        dependencies: HashMap<SystemId, Vec<SystemId>>,
+        allow_missing: bool,
+    ) -> Result<Vec<SystemId>, SystemError> {
+        let mut deps = dependencies
             .iter()
-            .filter(|&(_, &degree)| degree == 0)
-            .map(|(&id, _)| id)
-            .collect();
+            .map(|(id, deps)| (*id, HashSet::from_iter(deps.iter().cloned())))
+            .collect::<HashMap<_, HashSet<SystemId>>>();
 
-        let mut order = Vec::with_capacity(systems.len());
-        let mut placed: HashSet<SystemId> = HashSet::with_capacity(systems.len());
-
-        while let Some(&next) = ready.iter().next() {
-            ready.remove(&next);
-            order.push(next);
-            placed.insert(next);
-
-            for &dependent in &edges[&next] {
-                let degree = in_degree.get_mut(&dependent).unwrap();
-                *degree -= 1;
-                if *degree == 0 {
-                    ready.insert(dependent);
+        for (id, system_deps) in &mut deps {
+            let mut missing_deps = Vec::default();
+            for dep in system_deps.iter() {
+                if !dependencies.contains_key(&dep) {
+                    if allow_missing {
+                        missing_deps.push(*dep);
+                    } else {
+                        return Err(SystemError::MissingDependency(*id, *dep));
+                    }
                 }
             }
+
+            for dep in missing_deps {
+                system_deps.remove(&dep);
+            }
         }
 
-        if order.len() != systems.len() {
-            let stuck: Vec<SystemId> = systems
-                .keys()
-                .copied()
-                .filter(|id| !placed.contains(id))
-                .collect();
-            return Err(SystemError::SystemCyclicDependency(stuck));
+        let mut layers = HashMap::<usize, Vec<SystemId>>::default();
+        let mut placed = HashSet::<SystemId>::default();
+
+        while !deps.is_empty() {
+            let mut layer = Vec::default();
+
+            for (id, system_deps) in &deps {
+                if system_deps
+                    .iter()
+                    .all(|dep| !deps.contains_key(dep) && placed.contains(dep))
+                {
+                    layer.push(*id);
+                }
+            }
+
+            if layer.is_empty() {
+                return Err(SystemError::SystemCyclicDependency(
+                    deps.keys().copied().collect(),
+                ));
+            }
+
+            for id in &layer {
+                deps.remove(id);
+            }
+            placed.extend(&layer);
+            layers.insert(layers.len(), layer);
+        }
+
+        let mut l = layers.len() - 1;
+        let mut order = Vec::default();
+        while order.len() < dependencies.len() {
+            order.extend_from_slice(&layers[&l]);
+            if l != 0 {
+                l -= 1
+            };
         }
 
         Ok(order)
@@ -552,6 +604,7 @@ impl I131 {
                         SystemOp::Destroy => state
                             .all_systems
                             .get(&id)
+                            .map(|(thread, _)| thread)
                             .cloned()
                             .ok_or_system_error(SystemError::MissingSystem(id))?,
                     };
@@ -561,6 +614,8 @@ impl I131 {
                     Ok(acc)
                 },
             )?;
+
+            let mut changed = false;
 
             for (thread_name, ops) in per_thread {
                 let thread = state
@@ -574,11 +629,12 @@ impl I131 {
                 for (system_id, op) in ops {
                     match op {
                         SystemOp::Create(system_data) => {
-                            state.all_systems.insert(system_id, thread_name);
+                            let system_data = Arc::new(RwLock::new(system_data));
+                            state
+                                .all_systems
+                                .insert(system_id, (thread_name, system_data.clone()));
 
-                            thread_data
-                                .system_data
-                                .insert(system_data.system_id, Arc::new(RwLock::new(system_data)));
+                            thread_data.system_data.insert(system_id, system_data);
                         }
                         SystemOp::Destroy => {
                             let system = thread_data
@@ -606,10 +662,18 @@ impl I131 {
                 };
 
                 thread_data.order = sorted;
+                changed = true;
             }
 
             if state.all_systems.is_empty() {
                 state.state = EngineState::Stopped;
+            } else if changed {
+                let dependencies = state
+                    .all_systems
+                    .iter()
+                    .map(|(id, (_, data))| Ok((*id, data.read()?.dependencies.to_vec())))
+                    .collect::<Result<HashMap<SystemId, Vec<SystemId>>, SystemError>>()?;
+                state.lock_order = Self::create_lock_order(dependencies, false)?;
             }
         }
 

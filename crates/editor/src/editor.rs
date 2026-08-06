@@ -59,6 +59,11 @@ impl Editor {
 }
 
 impl System for Editor {
+    const SYSTEM_ID: SystemId = SystemId("Editor");
+    const DEPENDENCIES: &'static [SystemId] = &[];
+    const BEFORE: &'static [SystemId] = &[];
+    const AFTER: &'static [SystemId] = &[];
+
     fn initialize(
         &mut self,
         engine: &engine131::I131,
@@ -147,25 +152,5 @@ impl System for Editor {
         self.prog = ProgramHandle::null();
 
         Ok(())
-    }
-
-    fn after() -> &'static [engine131::systems::SystemId]
-    where
-        Self: Sized,
-    {
-        &[]
-    }
-    fn before() -> &'static [engine131::systems::SystemId]
-    where
-        Self: Sized,
-    {
-        &[]
-    }
-
-    fn system_id() -> engine131::systems::SystemId
-    where
-        Self: Sized,
-    {
-        SystemId("Editor131")
     }
 }
