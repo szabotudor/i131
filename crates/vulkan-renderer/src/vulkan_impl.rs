@@ -551,14 +551,14 @@ impl VulkanRenderer {
             self.device.device_wait_idle()?;
 
             self.device
-                .wait_for_fences(&[self.in_flight_fence], true, std::u64::MAX)?;
+                .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)?;
             self.device.reset_fences(&[self.in_flight_fence])?;
 
             let mut image_index = 0u32;
             (self.instance_extensions.acquire_next_image_khr)(
                 self.device.handle(),
                 self.swapchain.swapchain,
-                std::u64::MAX,
+                u64::MAX,
                 self.image_available_semaphore,
                 vk::Fence::null(),
                 &mut image_index as *mut u32,

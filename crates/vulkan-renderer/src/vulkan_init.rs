@@ -2,7 +2,7 @@
 use crate::SwapchainData;
 use crate::{
     CommandPools, DebugMessengerData, DebugMessengerUserData, DeviceQueues, InstanceExtensions,
-    QueueFamilyIndices, ValidationLevel, VulkanPipelineData, VulkanRenderer, VulkanRendererError,
+    QueueFamilyIndices, ValidationLevel, VulkanRenderer, VulkanRendererError,
 };
 use ash::{
     Device, Entry, Instance,
@@ -36,6 +36,17 @@ struct CreateSwapchainArgs<'a> {
     format: vk::SurfaceFormatKHR,
     present_mode: vk::PresentModeKHR,
     extent: vk::Extent2D,
+}
+
+struct CreateDeviceResult {
+    #[expect(dead_code, reason = "Not needed besides metadata")]
+    physical_device: vk::PhysicalDevice,
+    device: Device,
+    queue_family_indices: QueueFamilyIndices,
+    device_queues: DeviceQueues,
+    command_pools: CommandPools,
+    command_buffers: HashMap<vk::CommandPool, Vec<vk::CommandBuffer>>,
+    swapchain_details: SwapchainSupportDetails,
 }
 
 impl VulkanRenderer {
@@ -241,7 +252,7 @@ impl VulkanRenderer {
                 s_type: vk::InstanceCreateInfo::STRUCTURE_TYPE,
                 p_application_info: &app_info as *const vk::ApplicationInfo,
                 enabled_extension_count: required_extensions.len() as u32,
-                pp_enabled_extension_names: required_extensions.as_ptr() as *const *const i8,
+                pp_enabled_extension_names: required_extensions.as_ptr(),
                 enabled_layer_count: 0,
                 ..Default::default()
             };
@@ -622,7 +633,9 @@ impl VulkanRenderer {
                 s_type: vk::CommandPoolCreateInfo::STRUCTURE_TYPE,
                 flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
                 queue_family_index: queue_family_indices.graphics.ok_or_else(|| {
-                    VulkanRendererError::VulkanError(format!("Graphics queue family doesn't exist"))
+                    VulkanRendererError::VulkanError(
+                        "Graphics queue family doesn't exist".to_string(),
+                    )
                 })?,
                 ..Default::default()
             };
@@ -639,18 +652,7 @@ impl VulkanRenderer {
         instance: &Instance,
         instance_extensions: &InstanceExtensions,
         surface: vk::SurfaceKHR,
-    ) -> Result<
-        (
-            vk::PhysicalDevice,
-            Device,
-            QueueFamilyIndices,
-            DeviceQueues,
-            CommandPools,
-            HashMap<vk::CommandPool, Vec<vk::CommandBuffer>>,
-            SwapchainSupportDetails,
-        ),
-        VulkanRendererError,
-    > {
+    ) -> Result<CreateDeviceResult, VulkanRendererError> {
         unsafe {
             let device = instance
                 .enumerate_physical_devices()?
@@ -790,7 +792,7 @@ impl VulkanRenderer {
                     device.allocate_command_buffers(&command_buffer_alloc_info)?,
                 );
 
-                Ok((
+                Ok(CreateDeviceResult {
                     physical_device,
                     device,
                     queue_family_indices,
@@ -798,7 +800,7 @@ impl VulkanRenderer {
                     command_pools,
                     command_buffers,
                     swapchain_details,
-                ))
+                })
             } else {
                 Err(VulkanRendererError::NoSupportedDevices)
             }
@@ -1048,7 +1050,7 @@ impl VulkanRenderer {
                 .get_required_instance_extensions()
                 .ok_or_else(|| VulkanRendererError::GLFWInstanceError)?
                 .iter()
-                .map(|s| CString::from_str(&s))
+                .map(|s| CString::from_str(s))
                 .collect::<Result<Vec<_>, _>>()?;
             let required_extensions = required_extensions
                 .iter()
@@ -1066,15 +1068,15 @@ impl VulkanRenderer {
 
             let surface = Self::create_surface_glfw(&instance, &instance_extensions, window)?;
 
-            let (
-                _physical_device,
+            let CreateDeviceResult {
+                physical_device: _,
                 device,
                 queue_family_indices,
                 device_queues,
                 command_pools,
                 command_buffers,
                 swapchain_details,
-            ) = Self::create_device(&instance, &instance_extensions, surface)?;
+            } = Self::create_device(&instance, &instance_extensions, surface)?;
 
             let swapchain = Self::create_swapchain_glfw(
                 &instance_extensions,
@@ -1175,7 +1177,7 @@ impl VulkanRenderer {
                 self.device.destroy_framebuffer(*framebuffer, None);
             }
 
-            for (_handle, pipeline) in &self.pipelines {
+            for pipeline in self.pipelines.values() {
                 self.device.destroy_pipeline(pipeline.pipeline, None);
                 self.device.destroy_pipeline_layout(pipeline.layout, None);
             }
@@ -1184,7 +1186,7 @@ impl VulkanRenderer {
             self.device.destroy_render_pass(self.render_pass, None);
             self.render_pass = vk::RenderPass::null();
 
-            for (_, shader) in &self.shaders {
+            for shader in self.shaders.values() {
                 self.device
                     .destroy_shader_module(shader.shader_module, None);
             }

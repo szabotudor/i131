@@ -134,11 +134,14 @@ struct InstanceExtensions {
 }
 #[derive(Default)]
 struct SwapchainData {
+    #[expect(dead_code, reason = "Saved after creation for debugging")]
     swapchain_details: SwapchainSupportDetails,
     swapchain: vk::SwapchainKHR,
     format: vk::SurfaceFormatKHR,
     extent: vk::Extent2D,
+    #[expect(dead_code, reason = "Saved after creation for debugging")]
     present_mode: vk::PresentModeKHR,
+    #[expect(dead_code, reason = "Saved after creation for debugging")]
     swapchain_images: Vec<vk::Image>,
     swapchain_image_views: Vec<vk::ImageView>,
 }
@@ -146,6 +149,10 @@ struct SwapchainData {
 struct VulkanShaderData {
     shader_module: vk::ShaderModule,
     stage: ShaderStage,
+    #[expect(
+        dead_code,
+        reason = "Shader name might be used for search or debug later"
+    )]
     name: CString,
 }
 struct VulkanPipelineData {

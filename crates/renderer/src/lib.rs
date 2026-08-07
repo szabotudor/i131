@@ -60,7 +60,7 @@ trait HandleName {
 impl<T> Clone for Handle<T> {
     fn clone(&self) -> Self {
         Self {
-            raw: self.raw.clone(),
+            raw: self.raw,
             _marker: Default::default(),
         }
     }
@@ -76,7 +76,7 @@ impl<T> Eq for Handle<T> {}
 impl<T> Handle<T> {
     pub fn null() -> Self {
         Self {
-            raw: std::usize::MAX,
+            raw: usize::MAX,
             _marker: Default::default(),
         }
     }
