@@ -5,7 +5,7 @@ use crate::systems::{OptionSystemError, SystemData, SystemError, SystemId, Threa
 use std::{
     collections::HashMap,
     marker::PhantomData,
-    sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, Weak},
+    sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, Weak, atomic::AtomicUsize},
 };
 
 pub use math131;
@@ -20,11 +20,6 @@ pub enum EngineState {
     InEditor,
     Running,
     Stopped,
-}
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum EngineStage {
-    Ticking,
-    EndOfTick,
 }
 
 #[derive(Debug)]
@@ -94,7 +89,6 @@ pub(crate) struct EngineData {
     /// Will be incremented by each thread at the end of their ticks
     /// Engine will reset at end of frame when every thread is done
     state: EngineState,
-    stage: EngineStage,
 }
 impl EngineData {
     pub(crate) fn get_thread_data(&self, name: &'static str) -> Option<&Arc<RwLock<ThreadData>>> {
@@ -125,7 +119,6 @@ impl I131 {
                     all_systems: HashMap::new(),
                     lock_order: Vec::default(),
                     state: EngineState::default(),
-                    stage: EngineStage::Ticking,
                 }),
                 Condvar::new(),
             ),
@@ -150,12 +143,11 @@ impl I131 {
 
         loop {
             let state = {
-                let mut lock = self.lock()?;
+                let lock = self.lock()?;
                 if lock.all_systems.is_empty() && lock.state == EngineState::Stopped {
                     println!("Stopping engine");
                     break;
                 }
-                lock.stage = EngineStage::Ticking;
                 lock.state
             };
             self.notify_all();
@@ -164,8 +156,6 @@ impl I131 {
 
             {
                 self.process_create_and_destroy_queues()?;
-                let mut state = self.lock()?;
-                state.stage = EngineStage::EndOfTick;
             }
             self.notify_all();
         }
@@ -180,12 +170,6 @@ impl I131 {
         Ok(())
     }
 
-    pub(crate) fn wait_until_end_of_frame(
-        &self,
-    ) -> Result<MutexGuard<'_, EngineData>, SystemError> {
-        let lock = self.wait_until(|engine| engine.stage == EngineStage::EndOfTick)?;
-        Ok(lock)
-    }
     pub(crate) fn wait_while<F: FnMut(&mut EngineData) -> bool>(
         &self,
         f: F,

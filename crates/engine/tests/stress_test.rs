@@ -1,8 +1,8 @@
-use engine131::systems::{System, SystemError, SystemId};
+use engine131::systems::{System, SystemContext, SystemError, SystemId};
 use engine131::{I131, MainThread, Thread131, TicksPerSecond};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // -- Thread definitions --
 
@@ -18,6 +18,7 @@ impl Thread131 for GameThread {
 // -- System definitions --
 
 struct QuitAfter3Seconds {
+    context: SystemContext,
     once: bool,
     acc: f32,
     update_count: Arc<AtomicU64>,
@@ -26,6 +27,7 @@ struct QuitAfter3Seconds {
 impl QuitAfter3Seconds {
     fn new(update_count: Arc<AtomicU64>, success: Arc<AtomicBool>) -> Self {
         Self {
+            context: SystemContext::empty(),
             once: false,
             acc: 0.0f32,
             update_count,
@@ -39,38 +41,57 @@ impl System for QuitAfter3Seconds {
     const BEFORE: &'static [SystemId] = &[GameSystemA::SYSTEM_ID];
     const AFTER: &'static [SystemId] = &[];
 
-    fn initialize(&mut self, _engine: &I131) -> Result<(), SystemError> {
+    fn initialize(&mut self, context: SystemContext) -> Result<(), SystemError> {
+        self.context = context;
         println!("[QuitAfter3Seconds] initialized");
         Ok(())
     }
-    fn begin_play(&mut self, _engine: &I131) -> Result<(), SystemError> {
+    fn begin_play(&mut self) -> Result<(), SystemError> {
         println!("[QuitAfter3Seconds] begin_play");
         Ok(())
     }
-    fn update(&mut self, engine: &I131, _delta: f32) -> Result<(), SystemError> {
-        self.acc += _delta;
+    fn update(&mut self, delta: f32) -> Result<(), SystemError> {
+        self.acc += delta;
         if self.acc >= 1.5 && !self.once {
             println!(
                 "[QuitAfter3Seconds] 1.5 seconds elapsed, talking to GameSystemA and LogicSystemB"
             );
+
+            let request = self
+                .context
+                .lock_request()
+                .read::<GameSystemA>()?
+                .write::<LogicSystemB>()?;
+
+            let mut lock = request.acquire()?;
+
+            let game = lock.get::<GameSystemA>()?;
+            let rng = game.rng.load(Ordering::Relaxed);
+
+            println!("[QuitAfter3Seconds] RNG should now be {rng}");
+
+            let logic = lock.get_mut::<LogicSystemB>()?;
+            logic.rng.store(rng, Ordering::Relaxed);
+
             self.once = true;
         }
         if self.acc >= 3.0 {
             println!("[QuitAfter3Seconds] 3 seconds elapsed, requesting shutdown");
+            let engine = self.context.engine()?;
             engine.request_immediate_shutdown()?;
             self.success.store(true, Ordering::Relaxed);
         }
         self.update_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
-    fn in_editor_update(&mut self, _engine: &I131, _delta: f32) -> Result<(), SystemError> {
+    fn in_editor_update(&mut self, _delta: f32) -> Result<(), SystemError> {
         Ok(())
     }
-    fn end_play(&mut self, _engine: &I131) -> Result<(), SystemError> {
+    fn end_play(&mut self) -> Result<(), SystemError> {
         println!("[QuitAfter3Seconds] end_play");
         Ok(())
     }
-    fn destroy(&mut self, _engine: &I131) -> Result<(), SystemError> {
+    fn destroy(&mut self) -> Result<(), SystemError> {
         println!("[QuitAfter3Seconds] destroyed");
         Ok(())
     }
@@ -78,6 +99,7 @@ impl System for QuitAfter3Seconds {
 
 struct GameSystemA {
     update_count: Arc<AtomicU64>,
+    rng: Arc<AtomicUsize>,
 }
 impl System for GameSystemA {
     const SYSTEM_ID: SystemId = SystemId("GameSystemA");
@@ -85,26 +107,31 @@ impl System for GameSystemA {
     const BEFORE: &'static [SystemId] = &[];
     const AFTER: &'static [SystemId] = &[];
 
-    fn initialize(&mut self, _engine: &I131) -> Result<(), SystemError> {
+    fn initialize(&mut self, _context: SystemContext) -> Result<(), SystemError> {
         println!("[GameSystemA] initialized");
         Ok(())
     }
-    fn begin_play(&mut self, _engine: &I131) -> Result<(), SystemError> {
+    fn begin_play(&mut self) -> Result<(), SystemError> {
         println!("[GameSystemA] begin_play");
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock is before UNIX_EPOCH")
+            .subsec_nanos() as usize;
+        self.rng.store(nanos, Ordering::Relaxed);
         Ok(())
     }
-    fn update(&mut self, _engine: &I131, _delta: f32) -> Result<(), SystemError> {
+    fn update(&mut self, _delta: f32) -> Result<(), SystemError> {
         self.update_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
-    fn in_editor_update(&mut self, _engine: &I131, _delta: f32) -> Result<(), SystemError> {
+    fn in_editor_update(&mut self, _delta: f32) -> Result<(), SystemError> {
         Ok(())
     }
-    fn end_play(&mut self, _engine: &I131) -> Result<(), SystemError> {
+    fn end_play(&mut self) -> Result<(), SystemError> {
         println!("[GameSystemA] end_play");
         Ok(())
     }
-    fn destroy(&mut self, _engine: &I131) -> Result<(), SystemError> {
+    fn destroy(&mut self) -> Result<(), SystemError> {
         println!("[GameSystemA] destroyed");
         Ok(())
     }
@@ -112,6 +139,7 @@ impl System for GameSystemA {
 
 struct LogicSystemB {
     update_count: Arc<AtomicU64>,
+    rng: Arc<AtomicUsize>,
 }
 impl System for LogicSystemB {
     const SYSTEM_ID: SystemId = SystemId("LogicSystemB");
@@ -119,26 +147,26 @@ impl System for LogicSystemB {
     const BEFORE: &'static [SystemId] = &[LogicSystemC::SYSTEM_ID, GameSystemA::SYSTEM_ID];
     const AFTER: &'static [SystemId] = &[];
 
-    fn initialize(&mut self, _engine: &I131) -> Result<(), SystemError> {
+    fn initialize(&mut self, _context: SystemContext) -> Result<(), SystemError> {
         println!("[LogicSystemB] initialized");
         Ok(())
     }
-    fn begin_play(&mut self, _engine: &I131) -> Result<(), SystemError> {
+    fn begin_play(&mut self) -> Result<(), SystemError> {
         println!("[LogicSystemB] begin_play");
         Ok(())
     }
-    fn update(&mut self, _engine: &I131, _delta: f32) -> Result<(), SystemError> {
+    fn update(&mut self, _delta: f32) -> Result<(), SystemError> {
         self.update_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
-    fn in_editor_update(&mut self, _engine: &I131, _delta: f32) -> Result<(), SystemError> {
+    fn in_editor_update(&mut self, _delta: f32) -> Result<(), SystemError> {
         Ok(())
     }
-    fn end_play(&mut self, _engine: &I131) -> Result<(), SystemError> {
+    fn end_play(&mut self) -> Result<(), SystemError> {
         println!("[LogicSystemB] end_play");
         Ok(())
     }
-    fn destroy(&mut self, _engine: &I131) -> Result<(), SystemError> {
+    fn destroy(&mut self) -> Result<(), SystemError> {
         println!("[LogicSystemB] destroyed");
         Ok(())
     }
@@ -153,26 +181,26 @@ impl System for LogicSystemC {
     const BEFORE: &'static [SystemId] = &[];
     const AFTER: &'static [SystemId] = &[LogicSystemB::SYSTEM_ID];
 
-    fn initialize(&mut self, _engine: &I131) -> Result<(), SystemError> {
+    fn initialize(&mut self, _context: SystemContext) -> Result<(), SystemError> {
         println!("[LogicSystemC] initialized");
         Ok(())
     }
-    fn begin_play(&mut self, _engine: &I131) -> Result<(), SystemError> {
+    fn begin_play(&mut self) -> Result<(), SystemError> {
         println!("[LogicSystemC] begin_play");
         Ok(())
     }
-    fn update(&mut self, _engine: &I131, _delta: f32) -> Result<(), SystemError> {
+    fn update(&mut self, _delta: f32) -> Result<(), SystemError> {
         self.update_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
-    fn in_editor_update(&mut self, _engine: &I131, _delta: f32) -> Result<(), SystemError> {
+    fn in_editor_update(&mut self, _delta: f32) -> Result<(), SystemError> {
         Ok(())
     }
-    fn end_play(&mut self, _engine: &I131) -> Result<(), SystemError> {
+    fn end_play(&mut self) -> Result<(), SystemError> {
         println!("[LogicSystemC] end_play");
         Ok(())
     }
-    fn destroy(&mut self, _engine: &I131) -> Result<(), SystemError> {
+    fn destroy(&mut self) -> Result<(), SystemError> {
         println!("[LogicSystemC] destroyed");
         Ok(())
     }
@@ -187,6 +215,9 @@ fn stress_two_threads_four_systems_quit_after_3s() {
 
     let success = Arc::new(AtomicBool::new(false));
 
+    let rng1 = Arc::new(AtomicUsize::new(0));
+    let rng2 = Arc::new(AtomicUsize::new(0));
+
     let engine = I131::new().expect("failed to create engine");
 
     // GameThread (FullSpeed) — 2 systems
@@ -200,6 +231,7 @@ fn stress_two_threads_four_systems_quit_after_3s() {
         .create_system(
             GameSystemA {
                 update_count: Arc::clone(&game_updates),
+                rng: Arc::clone(&rng1),
             },
             MainThread::AFFINITY,
         )
@@ -210,6 +242,7 @@ fn stress_two_threads_four_systems_quit_after_3s() {
         .create_system(
             LogicSystemB {
                 update_count: Arc::clone(&logic_b_updates),
+                rng: Arc::clone(&rng2),
             },
             GameThread::AFFINITY,
         )
@@ -241,13 +274,22 @@ fn stress_two_threads_four_systems_quit_after_3s() {
 
     watchdog.join().expect("watchdog panicked");
 
+    assert!(
+        rng1.load(Ordering::Relaxed) == rng2.load(Ordering::Relaxed),
+        "rng1 ({}) != rng2 ({})",
+        rng1.load(Ordering::Relaxed),
+        rng2.load(Ordering::Relaxed),
+    );
+
     println!(
-        "test completed in {:.2}s| QuitAfter3Seconds updates: {} | GameSystemA updates: {} | LogicSystemB updates: {} | LogicSystemC updates: {}",
+        "test completed in {:.2}s| QuitAfter3Seconds updates: {} | GameSystemA updates: {} | LogicSystemB updates: {} | LogicSystemC updates: {}\nRNG-1: {} | RNG-2: {}",
         elapsed.as_secs_f64(),
         quit_updates.load(Ordering::Relaxed),
         game_updates.load(Ordering::Relaxed),
         logic_b_updates.load(Ordering::Relaxed),
         logic_c_updates.load(Ordering::Relaxed),
+        rng1.load(Ordering::Relaxed),
+        rng2.load(Ordering::Relaxed),
     );
 
     assert!(

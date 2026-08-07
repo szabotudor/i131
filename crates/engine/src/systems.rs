@@ -556,10 +556,9 @@ impl I131 {
                     let wait = std::time::Duration::from_millis(wait_at_least as u64);
                     std::thread::sleep(wait);
                 }
+                thread_data.write()?.delta_acc = delta_acc;
             }
         }
-
-        std::thread::sleep(std::time::Duration::from_millis(1));
 
         Ok(engine.lock()?.state)
     }
