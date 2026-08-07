@@ -160,6 +160,12 @@ struct VulkanPipelineData {
     layout: vk::PipelineLayout,
 }
 
+struct FlowControl {
+    image_available_semaphore: vk::Semaphore,
+    render_finished_semaphore: vk::Semaphore,
+    in_flight_fence: vk::Fence,
+}
+
 pub struct VulkanRenderer {
     destroyed: bool,
     _entry: Entry,
@@ -183,12 +189,13 @@ pub struct VulkanRenderer {
     shaders: HashMap<ShaderHandle, VulkanShaderData>,
     settings: Settings,
 
-    image_available_semaphore: vk::Semaphore,
-    render_finished_semaphore: vk::Semaphore,
-    in_flight_fence: vk::Fence,
+    flow_control: HashMap<vk::CommandBuffer, FlowControl>,
+    current_frame: usize,
 }
 unsafe impl Send for VulkanRenderer {}
 unsafe impl Sync for VulkanRenderer {}
+
+pub(crate) const MAX_FRAMES_IN_FLIGHT: u32 = 2;
 
 impl VulkanRenderer {
     #[cfg(feature = "GLFW")]

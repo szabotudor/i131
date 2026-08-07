@@ -8,7 +8,10 @@ use std::{
 use ash::vk::{self, TaggedStructure};
 use renderer131::{ProgramHandle, Settings, ShaderCreateInfo, ShaderHandle};
 
-use crate::{VulkanPipelineData, VulkanRenderer, VulkanRendererError, VulkanShaderData};
+use crate::{
+    FlowControl, MAX_FRAMES_IN_FLIGHT, VulkanPipelineData, VulkanRenderer, VulkanRendererError,
+    VulkanShaderData,
+};
 
 impl VulkanRenderer {
     fn settings_hash(settings: &Settings) -> usize {
@@ -443,6 +446,7 @@ impl VulkanRenderer {
     unsafe fn record_command_buffer(
         &mut self,
         program: ProgramHandle,
+        command_buffer: vk::CommandBuffer,
         image_index: usize,
     ) -> Result<vk::CommandBuffer, VulkanRendererError> {
         unsafe {
@@ -451,20 +455,6 @@ impl VulkanRenderer {
                 VulkanRendererError::VulkanError(format!(
                     "Pipeline doesn't exist for program {program:?}"
                 ))
-            })?;
-
-            let command_buffers = self
-                .command_buffers
-                .get(&self.command_pools.graphics)
-                .ok_or_else(|| {
-                    VulkanRendererError::VulkanError(
-                        "Graphics command pool doesn't have any command buffers".to_string(),
-                    )
-                })?;
-            let command_buffer = *command_buffers.first().ok_or_else(|| {
-                VulkanRendererError::VulkanError(
-                    "Expected command pool to have at least one command buffer".to_string(),
-                )
             })?;
 
             self.device.reset_command_buffer(
@@ -548,27 +538,48 @@ impl VulkanRenderer {
         program: ProgramHandle,
     ) -> Result<(), VulkanRendererError> {
         unsafe {
+            let command_buffers = self
+                .command_buffers
+                .get(&self.command_pools.graphics)
+                .ok_or_else(|| {
+                    VulkanRendererError::VulkanError(
+                        "Expected graphics command pool to exist".to_string(),
+                    )
+                })?;
+            let command_buffer = command_buffers[self.current_frame];
+
+            let FlowControl {
+                image_available_semaphore,
+                render_finished_semaphore,
+                in_flight_fence,
+            } = *self.flow_control.get(&command_buffer).ok_or_else(|| {
+                VulkanRendererError::VulkanError(
+                    "Flow control doesn't exist for expected command buffer".to_string(),
+                )
+            })?;
+
             self.device.device_wait_idle()?;
 
             self.device
-                .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)?;
-            self.device.reset_fences(&[self.in_flight_fence])?;
+                .wait_for_fences(&[in_flight_fence], true, u64::MAX)?;
+            self.device.reset_fences(&[in_flight_fence])?;
 
             let mut image_index = 0u32;
             (self.instance_extensions.acquire_next_image_khr)(
                 self.device.handle(),
                 self.swapchain.swapchain,
                 u64::MAX,
-                self.image_available_semaphore,
+                image_available_semaphore,
                 vk::Fence::null(),
                 &mut image_index as *mut u32,
             )
             .result()?;
 
-            let command_buffer = self.record_command_buffer(program, image_index as usize)?;
+            let command_buffer =
+                self.record_command_buffer(program, command_buffer, image_index as usize)?;
 
-            let wait_semaphores = [self.image_available_semaphore];
-            let signal_semaphores = [self.render_finished_semaphore];
+            let wait_semaphores = [image_available_semaphore];
+            let signal_semaphores = [render_finished_semaphore];
             let wait_stage = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
 
             let submit_info = vk::SubmitInfo {
@@ -587,7 +598,7 @@ impl VulkanRenderer {
                 // By now this should already be verified to exist
                 self.device_queues.graphics.unwrap(),
                 &[submit_info],
-                self.in_flight_fence,
+                in_flight_fence,
             )?;
 
             let present_info = vk::PresentInfoKHR {
@@ -606,6 +617,8 @@ impl VulkanRenderer {
                 &present_info as *const vk::PresentInfoKHR,
             )
             .result()?;
+
+            self.current_frame = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT as usize;
 
             Ok(())
         }

@@ -1,8 +1,9 @@
 #[cfg(feature = "GLFW")]
 use crate::SwapchainData;
 use crate::{
-    CommandPools, DebugMessengerData, DebugMessengerUserData, DeviceQueues, InstanceExtensions,
-    QueueFamilyIndices, ValidationLevel, VulkanRenderer, VulkanRendererError,
+    CommandPools, DebugMessengerData, DebugMessengerUserData, DeviceQueues, FlowControl,
+    InstanceExtensions, MAX_FRAMES_IN_FLIGHT, QueueFamilyIndices, ValidationLevel, VulkanRenderer,
+    VulkanRendererError,
 };
 use ash::{
     Device, Entry, Instance,
@@ -783,7 +784,7 @@ impl VulkanRenderer {
                     s_type: vk::CommandBufferAllocateInfo::STRUCTURE_TYPE,
                     command_pool: command_pools.graphics,
                     level: vk::CommandBufferLevel::PRIMARY,
-                    command_buffer_count: 1,
+                    command_buffer_count: MAX_FRAMES_IN_FLIGHT,
                     ..Default::default()
                 };
                 let mut command_buffers = HashMap::default();
@@ -1033,6 +1034,45 @@ impl VulkanRenderer {
         }
     }
 
+    fn create_flow_control(
+        device: &Device,
+        command_buffers: &[vk::CommandBuffer],
+    ) -> Result<HashMap<vk::CommandBuffer, FlowControl>, VulkanRendererError> {
+        unsafe {
+            let mut flows = HashMap::<vk::CommandBuffer, FlowControl>::default();
+
+            for command_buffer in command_buffers {
+                let semaphore_create_info = vk::SemaphoreCreateInfo {
+                    s_type: vk::SemaphoreCreateInfo::STRUCTURE_TYPE,
+                    ..Default::default()
+                };
+                let fence_create_info = vk::FenceCreateInfo {
+                    s_type: vk::FenceCreateInfo::STRUCTURE_TYPE,
+                    flags: vk::FenceCreateFlags::SIGNALED,
+                    ..Default::default()
+                };
+
+                let image_available_semaphore =
+                    device.create_semaphore(&semaphore_create_info, None)?;
+                let render_finished_semaphore =
+                    device.create_semaphore(&semaphore_create_info, None)?;
+
+                let in_flight_fence = device.create_fence(&fence_create_info, None)?;
+
+                flows.insert(
+                    *command_buffer,
+                    FlowControl {
+                        image_available_semaphore,
+                        render_finished_semaphore,
+                        in_flight_fence,
+                    },
+                );
+            }
+
+            Ok(flows)
+        }
+    }
+
     #[cfg(feature = "GLFW")]
     pub fn new_glfw_impl(
         name: &str,
@@ -1087,22 +1127,15 @@ impl VulkanRenderer {
                 window,
             )?;
 
-            let semaphore_create_info = vk::SemaphoreCreateInfo {
-                s_type: vk::SemaphoreCreateInfo::STRUCTURE_TYPE,
-                ..Default::default()
-            };
-            let fence_create_info = vk::FenceCreateInfo {
-                s_type: vk::FenceCreateInfo::STRUCTURE_TYPE,
-                flags: vk::FenceCreateFlags::SIGNALED,
-                ..Default::default()
-            };
-
-            let image_available_semaphore =
-                device.create_semaphore(&semaphore_create_info, None)?;
-            let render_finished_semaphore =
-                device.create_semaphore(&semaphore_create_info, None)?;
-
-            let in_flight_fence = device.create_fence(&fence_create_info, None)?;
+            let flow_control = Self::create_flow_control(
+                &device,
+                &command_buffers
+                    .iter()
+                    .fold(Vec::default(), |mut acc, (_, buffers)| {
+                        acc.extend_from_slice(&buffers);
+                        acc
+                    }),
+            )?;
 
             Ok(Self {
                 destroyed: false,
@@ -1125,9 +1158,8 @@ impl VulkanRenderer {
                 shaders: HashMap::default(),
                 settings: Settings::default(),
 
-                image_available_semaphore,
-                render_finished_semaphore,
-                in_flight_fence,
+                flow_control,
+                current_frame: 0,
             })
         }
     }
@@ -1163,11 +1195,19 @@ impl VulkanRenderer {
         self.debug_messenger = None;
 
         unsafe {
-            self.device
-                .destroy_semaphore(self.image_available_semaphore, None);
-            self.device
-                .destroy_semaphore(self.render_finished_semaphore, None);
-            self.device.destroy_fence(self.in_flight_fence, None);
+            for (_command_buffer, flow_control) in self.flow_control.drain() {
+                let FlowControl {
+                    image_available_semaphore,
+                    render_finished_semaphore,
+                    in_flight_fence,
+                } = flow_control;
+
+                self.device
+                    .destroy_semaphore(image_available_semaphore, None);
+                self.device
+                    .destroy_semaphore(render_finished_semaphore, None);
+                self.device.destroy_fence(in_flight_fence, None);
+            }
 
             self.device
                 .destroy_command_pool(self.command_pools.graphics, None);
