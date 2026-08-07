@@ -59,10 +59,7 @@ trait HandleName {
 
 impl<T> Clone for Handle<T> {
     fn clone(&self) -> Self {
-        Self {
-            raw: self.raw,
-            _marker: Default::default(),
-        }
+        *self
     }
 }
 impl<T> Copy for Handle<T> {}

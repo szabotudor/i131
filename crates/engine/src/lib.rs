@@ -5,7 +5,7 @@ use crate::systems::{OptionSystemError, SystemData, SystemError, SystemId, Threa
 use std::{
     collections::HashMap,
     marker::PhantomData,
-    sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, Weak, atomic::AtomicUsize},
+    sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, Weak},
 };
 
 pub use math131;

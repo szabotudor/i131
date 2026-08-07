@@ -337,13 +337,19 @@ impl<'a> LockRequest<'a> {
             match access {
                 RequestAccess::Read => {
                     let erased_entry = unsafe {
-                        std::mem::transmute::<_, RwLockReadGuard<'a, SystemData>>(data.read()?)
+                        std::mem::transmute::<
+                            RwLockReadGuard<'_, SystemData>,
+                            RwLockReadGuard<'a, SystemData>,
+                        >(data.read()?)
                     };
                     entries.insert(id, LockedSystemEntry::Read(data, erased_entry));
                 }
                 RequestAccess::Write => {
                     let erased_entry = unsafe {
-                        std::mem::transmute::<_, RwLockWriteGuard<'a, SystemData>>(data.write()?)
+                        std::mem::transmute::<
+                            RwLockWriteGuard<'_, SystemData>,
+                            RwLockWriteGuard<'a, SystemData>,
+                        >(data.write()?)
                     };
                     entries.insert(id, LockedSystemEntry::Write(data, erased_entry));
                 }
@@ -715,7 +721,7 @@ impl I131 {
         for (id, system_deps) in &mut deps {
             let mut missing_deps = Vec::default();
             for dep in system_deps.iter() {
-                if !dependencies.contains_key(&dep) {
+                if !dependencies.contains_key(dep) {
                     if allow_missing {
                         missing_deps.push(*dep);
                     } else {
@@ -761,9 +767,7 @@ impl I131 {
         let mut order = Vec::default();
         while order.len() < dependencies.len() {
             order.extend_from_slice(&layers[&l]);
-            if l != 0 {
-                l -= 1
-            };
+            l = l.saturating_sub(1);
         }
 
         Ok(order)
