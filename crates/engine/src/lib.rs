@@ -181,7 +181,7 @@ impl I131 {
         &self,
         mut f: F,
     ) -> Result<MutexGuard<'_, EngineData>, SystemError> {
-        let lock = self.state.1.wait_while(self.state.0.lock()?, |d| !f(d))?;
+        let lock = self.wait_while(|d| !f(d))?;
         Ok(lock)
     }
     pub(crate) fn lock(&self) -> Result<MutexGuard<'_, EngineData>, SystemError> {
