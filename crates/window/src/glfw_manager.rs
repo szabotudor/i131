@@ -18,6 +18,10 @@ impl super::Window {
         &self.data
     }
 
+    pub fn get_glfw_data_mut(&mut self) -> &mut WindowDataGLFW {
+        &mut self.data
+    }
+
     pub fn new(settings: super::WindowSettings) -> Result<Self, WindowError> {
         let mut glfw = glfw::init(Self::glfw_error_callback)?;
 
