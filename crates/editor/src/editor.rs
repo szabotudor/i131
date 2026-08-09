@@ -1,3 +1,5 @@
+use std::{cell::RefCell, rc::Rc};
+
 use engine131::{
     math131::Vec2u32,
     renderer131::{
@@ -23,7 +25,7 @@ pub enum EditorError {
 pub(crate) struct Editor {
     context: SystemContext,
     renderer: Box<dyn Renderer>,
-    window: Window,
+    window: Rc<RefCell<Window>>,
     vert: ShaderHandle,
     frag: ShaderHandle,
     prog: ProgramHandle,
@@ -33,19 +35,19 @@ unsafe impl Sync for Editor {}
 
 impl Editor {
     pub fn new() -> Result<Self, EditorError> {
-        let window = Window::new(
+        let window = Rc::new(RefCell::new(Window::new(
             WindowSettings::new()
                 .with_title("I131".to_string())
                 .with_size(Vec2u32::new(800, 600))
                 .with_mode(WindowMode::Windowed),
-        )?;
+        )?));
         // TODO: Implement system init arguments
         //
         // Needed to enable/disable validation here
         let renderer = VulkanRenderer::new_glfw(
             "I131_VulkanBackend",
             (1, 3, 0),
-            window.get_glfw_data(),
+            window.clone(),
             ValidationLevel::Normal,
         )?;
 
@@ -102,14 +104,17 @@ impl System for Editor {
     fn update(&mut self, delta: f32) -> Result<(), engine131::systems::SystemError> {
         let _ = delta;
         let engine = self.context.engine()?;
+        let mut window = self.window.borrow_mut();
 
-        self.renderer.execute(self.prog)?;
+        window.update();
 
-        self.window.update();
-
-        if self.window.should_close() {
+        if window.should_close() {
             engine.request_immediate_shutdown()?;
         }
+
+        drop(window);
+
+        self.renderer.execute(self.prog)?;
 
         Ok(())
     }
@@ -117,12 +122,15 @@ impl System for Editor {
     fn in_editor_update(&mut self, delta: f32) -> Result<(), engine131::systems::SystemError> {
         let _ = delta;
         let engine = self.context.engine()?;
+        let mut window = self.window.borrow_mut();
 
-        self.window.update();
+        window.update();
 
-        if self.window.should_close() {
+        if window.should_close() {
             engine.request_immediate_shutdown()?;
         }
+
+        drop(window);
 
         Ok(())
     }

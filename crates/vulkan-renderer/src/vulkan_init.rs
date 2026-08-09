@@ -13,6 +13,8 @@ use ash::{
 use raw_window_handle::{WaylandDisplayHandle, WaylandWindowHandle};
 #[cfg(target_os = "windows")]
 use raw_window_handle::{Win32WindowHandle, WindowsDisplayHandle};
+#[cfg(feature = "GLFW")]
+use std::{cell::RefCell, rc::Rc};
 use std::{
     collections::HashMap,
     ffi::{CStr, CString, c_void},
@@ -20,6 +22,8 @@ use std::{
     str::FromStr,
     sync::{Arc, RwLock},
 };
+#[cfg(feature = "GLFW")]
+use window131::Window;
 use window131::WindowDataGLFW;
 
 #[derive(Default)]
@@ -27,6 +31,9 @@ pub(crate) struct SwapchainSupportDetails {
     capabilities: vk::SurfaceCapabilitiesKHR,
     formats: Vec<vk::SurfaceFormatKHR>,
     present_modes: Vec<vk::PresentModeKHR>,
+
+    format: vk::SurfaceFormatKHR,
+    present_mode: vk::PresentModeKHR,
 }
 struct CreateSwapchainArgs<'a> {
     instance_extensions: &'a InstanceExtensions,
@@ -421,10 +428,16 @@ impl VulkanRenderer {
             )
             .result()?;
 
+            let format = Self::choose_swapchain_format(&formats)?;
+            let present_mode = Self::choose_swap_present_mode(&present_modes)?;
+
             Ok(SwapchainSupportDetails {
                 capabilities: surface_capabilities.assume_init(),
                 formats,
                 present_modes,
+
+                format,
+                present_mode,
             })
         }
     }
@@ -950,8 +963,7 @@ impl VulkanRenderer {
     }
 
     unsafe fn create_swapchain_image_views(
-        device: &Device,
-        swapchain_format: vk::SurfaceFormatKHR,
+        &self,
         swapchain_images: &[vk::Image],
     ) -> Result<Vec<vk::ImageView>, VulkanRendererError> {
         unsafe {
@@ -962,7 +974,7 @@ impl VulkanRenderer {
                         s_type: vk::ImageViewCreateInfo::STRUCTURE_TYPE,
                         image: *image,
                         view_type: vk::ImageViewType::TYPE_2D,
-                        format: swapchain_format.format,
+                        format: self.swapchain_details.format.format,
                         components: vk::ComponentMapping {
                             r: vk::ComponentSwizzle::IDENTITY,
                             g: vk::ComponentSwizzle::IDENTITY,
@@ -979,7 +991,9 @@ impl VulkanRenderer {
                         ..Default::default()
                     };
 
-                    let image_view = device.create_image_view(&image_view_create_info, None)?;
+                    let image_view = self
+                        .device
+                        .create_image_view(&image_view_create_info, None)?;
                     Ok(image_view)
                 })
                 .collect::<Result<Vec<_>, VulkanRendererError>>()?;
@@ -988,13 +1002,39 @@ impl VulkanRenderer {
         }
     }
 
+    unsafe fn create_swapchain_framebuffers(
+        &self,
+        swapchain_image_views: &[vk::ImageView],
+        extent: vk::Extent2D,
+    ) -> Result<Vec<vk::Framebuffer>, VulkanRendererError> {
+        swapchain_image_views
+            .iter()
+            .map(|image_view| {
+                let attachments = [*image_view];
+
+                let framebuffer_create_info = vk::FramebufferCreateInfo {
+                    s_type: vk::FramebufferCreateInfo::STRUCTURE_TYPE,
+                    render_pass: self.render_pass,
+                    attachment_count: 1,
+                    p_attachments: attachments.as_ptr(),
+                    width: extent.width,
+                    height: extent.height,
+                    layers: 1,
+                    ..Default::default()
+                };
+
+                let framebuffer = unsafe {
+                    self.device
+                        .create_framebuffer(&framebuffer_create_info, None)
+                }?;
+                Ok(framebuffer)
+            })
+            .collect::<Result<Vec<_>, VulkanRendererError>>()
+    }
+
     #[cfg(feature = "GLFW")]
     unsafe fn create_swapchain_glfw(
-        instance_extensions: &InstanceExtensions,
-        device: &Device,
-        swapchain_details: SwapchainSupportDetails,
-        surface: vk::SurfaceKHR,
-        queue_family_indices: &QueueFamilyIndices,
+        &self,
         window: &WindowDataGLFW,
     ) -> Result<SwapchainData, VulkanRendererError> {
         unsafe {
@@ -1004,34 +1044,86 @@ impl VulkanRenderer {
                 height: window_extent.1 as u32,
             };
 
-            let format = Self::choose_swapchain_format(&swapchain_details.formats)?;
-            let present_mode = Self::choose_swap_present_mode(&swapchain_details.present_modes)?;
-            let extent = Self::choose_swap_extent(&swapchain_details.capabilities, window_extent)?;
+            let extent =
+                Self::choose_swap_extent(&self.swapchain_details.capabilities, window_extent)?;
 
             let (swapchain, swapchain_images) = Self::create_swapchain(CreateSwapchainArgs {
-                instance_extensions,
-                device: device.handle(),
-                swapchain_details: &swapchain_details,
-                queue_family_indices,
-                surface,
-                format,
-                present_mode,
+                instance_extensions: &self.instance_extensions,
+                device: self.device.handle(),
+                swapchain_details: &self.swapchain_details,
+                queue_family_indices: &self.queue_family_indices,
+                surface: self.surface,
+                format: self.swapchain_details.format,
+                present_mode: self.swapchain_details.present_mode,
                 extent,
             })?;
 
-            let swapchain_image_views =
-                Self::create_swapchain_image_views(device, format, &swapchain_images)?;
+            let swapchain_image_views = self.create_swapchain_image_views(&swapchain_images)?;
+            let framebuffers =
+                self.create_swapchain_framebuffers(&swapchain_image_views, extent)?;
 
             Ok(SwapchainData {
-                swapchain_details,
                 swapchain,
-                format,
                 extent,
-                present_mode,
                 swapchain_images,
                 swapchain_image_views,
+                framebuffers,
             })
         }
+    }
+
+    fn create_render_pass(
+        device: &Device,
+        swapchain_format: vk::SurfaceFormatKHR,
+    ) -> Result<vk::RenderPass, VulkanRendererError> {
+        let color_attachment = vk::AttachmentDescription {
+            format: swapchain_format.format,
+            samples: vk::SampleCountFlags::TYPE_1,
+            load_op: vk::AttachmentLoadOp::CLEAR,
+            store_op: vk::AttachmentStoreOp::STORE,
+            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
+            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+            initial_layout: vk::ImageLayout::UNDEFINED,
+            final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+            ..Default::default()
+        };
+
+        let color_attachment_ref = vk::AttachmentReference {
+            attachment: 0,
+            layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+        };
+
+        let subpass = vk::SubpassDescription {
+            pipeline_bind_point: vk::PipelineBindPoint::GRAPHICS,
+            color_attachment_count: 1,
+            p_color_attachments: &color_attachment_ref as *const vk::AttachmentReference,
+            ..Default::default()
+        };
+
+        let dependency = vk::SubpassDependency {
+            src_subpass: vk::SUBPASS_EXTERNAL,
+            dst_subpass: 0,
+            src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            src_access_mask: vk::AccessFlags::NONE,
+            dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            ..Default::default()
+        };
+
+        let render_pass_create_info = vk::RenderPassCreateInfo {
+            s_type: vk::RenderPassCreateInfo::STRUCTURE_TYPE,
+            attachment_count: 1,
+            p_attachments: &color_attachment as *const vk::AttachmentDescription,
+            subpass_count: 1,
+            p_subpasses: &subpass as *const vk::SubpassDescription,
+            dependency_count: 1,
+            p_dependencies: &dependency as *const vk::SubpassDependency,
+            ..Default::default()
+        };
+
+        let render_pass = unsafe { device.create_render_pass(&render_pass_create_info, None) }?;
+
+        Ok(render_pass)
     }
 
     fn create_flow_control(
@@ -1077,7 +1169,7 @@ impl VulkanRenderer {
     pub fn new_glfw_impl(
         name: &str,
         app_version: (u32, u32, u32),
-        window: &WindowDataGLFW,
+        window: Rc<RefCell<Window>>,
         enable_validation: ValidationLevel,
     ) -> Result<Self, VulkanRendererError> {
         unsafe {
@@ -1085,7 +1177,28 @@ impl VulkanRenderer {
 
             use renderer131::Settings;
 
-            let required_extensions = window
+            let mut raw_window = window.borrow_mut();
+            let glfw = raw_window.get_glfw_data_mut();
+
+            let framebuffer_resized = Rc::new(RefCell::new(None));
+
+            let framebuffer_resized_clone = framebuffer_resized.clone();
+            glfw.window.set_framebuffer_size_callback(
+                move |#[expect(
+                    unused_variables,
+                    reason = "We don't need to do anything with window"
+                )]
+                      window,
+                      width,
+                      height| {
+                    use math131::Vec2i32;
+
+                    let mut framebuffer_resized = framebuffer_resized_clone.borrow_mut();
+                    *framebuffer_resized = Some(Vec2i32::new(width, height));
+                },
+            );
+
+            let required_extensions = glfw
                 .glfw
                 .get_required_instance_extensions()
                 .ok_or_else(|| VulkanRendererError::GLFWInstanceError)?
@@ -1106,7 +1219,7 @@ impl VulkanRenderer {
             let debug_messenger =
                 Self::create_debug_messenger(&instance, &instance_extensions, enable_validation)?;
 
-            let surface = Self::create_surface_glfw(&instance, &instance_extensions, window)?;
+            let surface = Self::create_surface_glfw(&instance, &instance_extensions, glfw)?;
 
             let CreateDeviceResult {
                 physical_device: _,
@@ -1118,49 +1231,103 @@ impl VulkanRenderer {
                 swapchain_details,
             } = Self::create_device(&instance, &instance_extensions, surface)?;
 
-            let swapchain = Self::create_swapchain_glfw(
-                &instance_extensions,
-                &device,
-                swapchain_details,
-                surface,
-                &queue_family_indices,
-                window,
-            )?;
+            let render_pass = Self::create_render_pass(&device, swapchain_details.format)?;
+
+            let create_swapchain_fn = Box::new(
+                |renderer: &VulkanRenderer,
+                 window: &WindowDataGLFW|
+                 -> Result<SwapchainData, VulkanRendererError> {
+                    let swapchain_data = renderer.create_swapchain_glfw(window)?;
+
+                    Ok(swapchain_data)
+                },
+            );
 
             let flow_control = Self::create_flow_control(
                 &device,
                 &command_buffers
                     .iter()
                     .fold(Vec::default(), |mut acc, (_, buffers)| {
-                        acc.extend_from_slice(&buffers);
+                        acc.extend_from_slice(buffers);
                         acc
                     }),
             )?;
 
-            Ok(Self {
+            drop(raw_window);
+
+            let mut renderer = Self {
+                window,
+                framebuffer_resized,
+
                 destroyed: false,
                 _entry: entry,
                 instance,
                 instance_extensions,
                 device,
                 device_queues,
+                queue_family_indices,
                 command_pools,
                 command_buffers,
-                swapchain,
+                swapchain_details,
+                swapchain: SwapchainData::default(),
+                create_swapchain_fn,
                 surface,
                 debug_messenger,
 
                 programs: HashMap::default(),
                 pipelines: HashMap::default(),
-                render_pass: vk::RenderPass::null(),
-                swapchain_framebuffers: Vec::default(),
+                render_pass,
                 shader_handles: 0usize,
                 shaders: HashMap::default(),
                 settings: Settings::default(),
 
                 flow_control,
                 current_frame: 0,
-            })
+            };
+
+            renderer.recreate_swapchain()?;
+
+            Ok(renderer)
+        }
+    }
+
+    fn destroy_swapchain(&mut self) -> Result<(), VulkanRendererError> {
+        unsafe {
+            for framebuffer in &self.swapchain.framebuffers {
+                self.device.destroy_framebuffer(*framebuffer, None);
+            }
+            self.swapchain.framebuffers.clear();
+
+            for image_view in &self.swapchain.swapchain_image_views {
+                self.device.destroy_image_view(*image_view, None);
+            }
+            self.swapchain.swapchain_image_views.clear();
+
+            if self.swapchain.swapchain != vk::SwapchainKHR::null() {
+                (self.instance_extensions.destroy_swapchain_khr)(
+                    self.device.handle(),
+                    self.swapchain.swapchain,
+                    null(),
+                );
+                self.swapchain = SwapchainData::default();
+            }
+
+            Ok(())
+        }
+    }
+
+    pub(crate) fn recreate_swapchain(&mut self) -> Result<(), VulkanRendererError> {
+        unsafe {
+            self.device.device_wait_idle()?;
+
+            self.destroy_swapchain()?;
+
+            let window = self.window.borrow();
+
+            let swapchain_data = (self.create_swapchain_fn)(self, window.get_glfw_data())?;
+            self.swapchain = swapchain_data;
+
+            Ok(())
         }
     }
 
@@ -1213,10 +1380,6 @@ impl VulkanRenderer {
                 .destroy_command_pool(self.command_pools.graphics, None);
             self.command_buffers.clear();
 
-            for framebuffer in &self.swapchain_framebuffers {
-                self.device.destroy_framebuffer(*framebuffer, None);
-            }
-
             for pipeline in self.pipelines.values() {
                 self.device.destroy_pipeline(pipeline.pipeline, None);
                 self.device.destroy_pipeline_layout(pipeline.layout, None);
@@ -1232,17 +1395,7 @@ impl VulkanRenderer {
             }
             self.shaders.clear();
 
-            for image_view in &self.swapchain.swapchain_image_views {
-                self.device.destroy_image_view(*image_view, None);
-            }
-            self.swapchain.swapchain_image_views.clear();
-
-            (self.instance_extensions.destroy_swapchain_khr)(
-                self.device.handle(),
-                self.swapchain.swapchain,
-                null(),
-            );
-            self.swapchain = SwapchainData::default();
+            self.destroy_swapchain()?;
 
             self.device.destroy_device(None);
             (self.instance_extensions.destroy_surface_khr)(

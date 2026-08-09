@@ -1,4 +1,5 @@
 use ash::{Device, Entry, Instance, LoadingError, vk};
+use math131::Vec2i32;
 #[cfg(feature = "GLFW")]
 use raw_window_handle::HandleError;
 #[cfg(feature = "GLFW")]
@@ -7,6 +8,8 @@ use renderer131::{
     ProgramHandle, Renderer, RendererInstanceError, Settings, ShaderCreateInfo, ShaderHandle,
     ShaderStage,
 };
+#[cfg(feature = "GLFW")]
+use std::{cell::RefCell, rc::Rc};
 use std::{
     collections::HashMap,
     ffi::{CString, NulError, c_void},
@@ -14,7 +17,7 @@ use std::{
 };
 use thiserror::Error;
 #[cfg(feature = "GLFW")]
-use window131::WindowDataGLFW;
+use window131::{Window, WindowDataGLFW};
 
 use crate::vulkan_init::SwapchainSupportDetails;
 
@@ -27,6 +30,9 @@ pub enum VulkanRendererError {
     #[cfg(feature = "GLFW")]
     #[error("Error getting GLFW instance")]
     GLFWInstanceError,
+
+    #[error("Window RefCell should not be borrowed when `execute` is invoked on a vulkan renderer")]
+    WindowAlreadyBorrowedError,
 
     #[cfg(feature = "GLFW")]
     #[error("Unknown GLFW error: {0}")]
@@ -132,19 +138,18 @@ struct InstanceExtensions {
     acquire_next_image_khr: vk::PFN_vkAcquireNextImageKHR,
     queue_present_khr: vk::PFN_vkQueuePresentKHR,
 }
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct SwapchainData {
-    #[expect(dead_code, reason = "Saved after creation for debugging")]
-    swapchain_details: SwapchainSupportDetails,
     swapchain: vk::SwapchainKHR,
-    format: vk::SurfaceFormatKHR,
     extent: vk::Extent2D,
-    #[expect(dead_code, reason = "Saved after creation for debugging")]
-    present_mode: vk::PresentModeKHR,
-    #[expect(dead_code, reason = "Saved after creation for debugging")]
+    #[expect(dead_code, reason = "Kept for debugging, not needed after creation")]
     swapchain_images: Vec<vk::Image>,
     swapchain_image_views: Vec<vk::ImageView>,
+    framebuffers: Vec<vk::Framebuffer>,
 }
+
+type CreateSwapchainFn =
+    Box<dyn Fn(&VulkanRenderer, &WindowDataGLFW) -> Result<SwapchainData, VulkanRendererError>>;
 
 struct VulkanShaderData {
     shader_module: vk::ShaderModule,
@@ -167,15 +172,21 @@ struct FlowControl {
 }
 
 pub struct VulkanRenderer {
+    window: Rc<RefCell<Window>>,
+    framebuffer_resized: Rc<RefCell<Option<Vec2i32>>>,
+
     destroyed: bool,
     _entry: Entry,
     instance: Instance,
     instance_extensions: InstanceExtensions,
     device: Device,
     device_queues: DeviceQueues,
+    queue_family_indices: QueueFamilyIndices,
     command_pools: CommandPools,
     command_buffers: HashMap<vk::CommandPool, Vec<vk::CommandBuffer>>,
+    swapchain_details: SwapchainSupportDetails,
     swapchain: SwapchainData,
+    create_swapchain_fn: CreateSwapchainFn,
     surface: vk::SurfaceKHR,
     debug_messenger: Option<DebugMessengerData>,
 
@@ -184,7 +195,6 @@ pub struct VulkanRenderer {
     programs: HashMap<ProgramHandle, (Vec<ShaderHandle>, Vec<usize>)>,
     pipelines: HashMap<usize, VulkanPipelineData>,
     render_pass: vk::RenderPass,
-    swapchain_framebuffers: Vec<vk::Framebuffer>,
     shader_handles: usize,
     shaders: HashMap<ShaderHandle, VulkanShaderData>,
     settings: Settings,
@@ -202,7 +212,7 @@ impl VulkanRenderer {
     pub fn new_glfw(
         name: &str,
         app_version: (u32, u32, u32),
-        window: &WindowDataGLFW,
+        window: Rc<RefCell<Window>>,
         enable_validation: ValidationLevel,
     ) -> Result<Self, RendererError> {
         Ok(Self::new_glfw_impl(

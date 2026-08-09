@@ -204,7 +204,7 @@ impl VulkanRenderer {
             })
             .collect::<Result<Vec<_>, VulkanRendererError>>()?;
 
-        let render_pass = self.get_or_create_render_pass()?;
+        let render_pass = self.render_pass;
         // Create pipeline after pipeline layout
         let pipeline_create_info = vk::GraphicsPipelineCreateInfo {
             s_type: vk::GraphicsPipelineCreateInfo::STRUCTURE_TYPE,
@@ -247,93 +247,6 @@ impl VulkanRenderer {
             pipeline,
             layout: pipeline_layout,
         })
-    }
-
-    fn get_or_create_render_pass(&mut self) -> Result<vk::RenderPass, VulkanRendererError> {
-        if self.render_pass != vk::RenderPass::null() {
-            return Ok(self.render_pass);
-        }
-
-        let color_attachment = vk::AttachmentDescription {
-            format: self.swapchain.format.format,
-            samples: vk::SampleCountFlags::TYPE_1,
-            load_op: vk::AttachmentLoadOp::CLEAR,
-            store_op: vk::AttachmentStoreOp::STORE,
-            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
-            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
-            initial_layout: vk::ImageLayout::UNDEFINED,
-            final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
-            ..Default::default()
-        };
-
-        let color_attachment_ref = vk::AttachmentReference {
-            attachment: 0,
-            layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-        };
-
-        let subpass = vk::SubpassDescription {
-            pipeline_bind_point: vk::PipelineBindPoint::GRAPHICS,
-            color_attachment_count: 1,
-            p_color_attachments: &color_attachment_ref as *const vk::AttachmentReference,
-            ..Default::default()
-        };
-
-        let dependency = vk::SubpassDependency {
-            src_subpass: vk::SUBPASS_EXTERNAL,
-            dst_subpass: 0,
-            src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            src_access_mask: vk::AccessFlags::NONE,
-            dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-            ..Default::default()
-        };
-
-        let render_pass_create_info = vk::RenderPassCreateInfo {
-            s_type: vk::RenderPassCreateInfo::STRUCTURE_TYPE,
-            attachment_count: 1,
-            p_attachments: &color_attachment as *const vk::AttachmentDescription,
-            subpass_count: 1,
-            p_subpasses: &subpass as *const vk::SubpassDescription,
-            dependency_count: 1,
-            p_dependencies: &dependency as *const vk::SubpassDependency,
-            ..Default::default()
-        };
-
-        let render_pass = unsafe {
-            self.device
-                .create_render_pass(&render_pass_create_info, None)
-        }?;
-
-        let swapchain_framebuffers = self
-            .swapchain
-            .swapchain_image_views
-            .iter()
-            .map(|image_view| {
-                let attachments = [*image_view];
-
-                let framebuffer_create_info = vk::FramebufferCreateInfo {
-                    s_type: vk::FramebufferCreateInfo::STRUCTURE_TYPE,
-                    render_pass,
-                    attachment_count: 1,
-                    p_attachments: attachments.as_ptr(),
-                    width: self.swapchain.extent.width,
-                    height: self.swapchain.extent.height,
-                    layers: 1,
-                    ..Default::default()
-                };
-
-                let framebuffer = unsafe {
-                    self.device
-                        .create_framebuffer(&framebuffer_create_info, None)
-                }?;
-                Ok(framebuffer)
-            })
-            .collect::<Result<Vec<_>, VulkanRendererError>>()?;
-
-        self.render_pass = render_pass;
-        self.swapchain_framebuffers = swapchain_framebuffers;
-
-        Ok(render_pass)
     }
 
     pub(crate) unsafe fn create_shaders_impl(
@@ -485,7 +398,7 @@ impl VulkanRenderer {
             let render_pass_begin_info = vk::RenderPassBeginInfo {
                 s_type: vk::RenderPassBeginInfo::STRUCTURE_TYPE,
                 render_pass: self.render_pass,
-                framebuffer: self.swapchain_framebuffers[image_index],
+                framebuffer: self.swapchain.framebuffers[image_index],
                 render_area: vk::Rect2D {
                     offset: vk::Offset2D { x: 0, y: 0 },
                     extent: self.swapchain.extent,
@@ -537,6 +450,10 @@ impl VulkanRenderer {
         &mut self,
         program: ProgramHandle,
     ) -> Result<(), VulkanRendererError> {
+        self.window
+            .try_borrow()
+            .map_err(|_| VulkanRendererError::WindowAlreadyBorrowedError)?;
+
         unsafe {
             let command_buffers = self
                 .command_buffers
@@ -562,10 +479,19 @@ impl VulkanRenderer {
 
             self.device
                 .wait_for_fences(&[in_flight_fence], true, u64::MAX)?;
-            self.device.reset_fences(&[in_flight_fence])?;
+
+            let framebuffer_new_size = *self.framebuffer_resized.borrow();
+            #[expect(
+                unused_variables,
+                reason = "Swapchain creation already queries window size. Already implemented, so easier to reuse existing code"
+            )]
+            if let Some(new_size) = framebuffer_new_size {
+                self.recreate_swapchain()?;
+                *self.framebuffer_resized.borrow_mut() = None;
+            }
 
             let mut image_index = 0u32;
-            (self.instance_extensions.acquire_next_image_khr)(
+            match (self.instance_extensions.acquire_next_image_khr)(
                 self.device.handle(),
                 self.swapchain.swapchain,
                 u64::MAX,
@@ -573,7 +499,18 @@ impl VulkanRenderer {
                 vk::Fence::null(),
                 &mut image_index as *mut u32,
             )
-            .result()?;
+            .result()
+            {
+                Ok(_) => {}
+                Err(err) => match err {
+                    vk::Result::ERROR_OUT_OF_DATE_KHR | vk::Result::SUBOPTIMAL_KHR => {
+                        self.recreate_swapchain()?;
+                    }
+                    _ => {}
+                },
+            }
+
+            self.device.reset_fences(&[in_flight_fence])?;
 
             let command_buffer =
                 self.record_command_buffer(program, command_buffer, image_index as usize)?;
@@ -612,11 +549,20 @@ impl VulkanRenderer {
                 ..Default::default()
             };
 
-            (self.instance_extensions.queue_present_khr)(
+            match (self.instance_extensions.queue_present_khr)(
                 self.device_queues.present.unwrap(),
                 &present_info as *const vk::PresentInfoKHR,
             )
-            .result()?;
+            .result()
+            {
+                Ok(_) => {}
+                Err(err) => match err {
+                    vk::Result::ERROR_OUT_OF_DATE_KHR | vk::Result::SUBOPTIMAL_KHR => {
+                        self.recreate_swapchain()?;
+                    }
+                    _ => {}
+                },
+            }
 
             self.current_frame = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT as usize;
 
