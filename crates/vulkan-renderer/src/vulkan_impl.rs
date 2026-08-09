@@ -450,6 +450,8 @@ impl VulkanRenderer {
         &mut self,
         program: ProgramHandle,
     ) -> Result<(), VulkanRendererError> {
+        // TODO: Should find a better way to recreate swapchain that doesn't force the user into
+        // specific code flow
         self.window
             .try_borrow()
             .map_err(|_| VulkanRendererError::WindowAlreadyBorrowedError)?;
@@ -481,12 +483,13 @@ impl VulkanRenderer {
                 .wait_for_fences(&[in_flight_fence], true, u64::MAX)?;
 
             let framebuffer_new_size = *self.framebuffer_resized.borrow();
-            #[expect(
-                unused_variables,
-                reason = "Swapchain creation already queries window size. Already implemented, so easier to reuse existing code"
-            )]
             if let Some(new_size) = framebuffer_new_size {
                 self.recreate_swapchain()?;
+
+                if new_size.x == 0 || new_size.y == 0 {
+                    return Ok(());
+                }
+
                 *self.framebuffer_resized.borrow_mut() = None;
             }
 
