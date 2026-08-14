@@ -242,20 +242,20 @@ pub struct Settings {
     pub clear_color: Vec4f32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum ScalarKind {
     Float,
     SInt,
     UInt,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum ComponentBitCount {
     Scalar(u8),
     Two { a: u8, b: u8 },
     Three { r: u8, g: u8, b: u8 },
     Four { r: u8, g: u8, b: u8, a: u8 },
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct BufferFieldFormat {
     pub kind: ScalarKind,
     pub normalized: bool,

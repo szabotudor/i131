@@ -129,6 +129,7 @@ struct DeviceQueues {
 }
 struct CommandPools {
     graphics: vk::CommandPool,
+    utility: vk::CommandPool,
 }
 struct InstanceExtensions {
     create_debug_utils_messenger_ext: Option<vk::PFN_vkCreateDebugUtilsMessengerEXT>,
@@ -188,6 +189,8 @@ struct FlowControl {
     image_available_semaphore: vk::Semaphore,
     render_finished_semaphore: vk::Semaphore,
     in_flight_fence: vk::Fence,
+
+    utility_fence: vk::Fence,
 }
 
 pub struct VulkanRenderer {

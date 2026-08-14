@@ -642,21 +642,31 @@ impl VulkanRenderer {
         queue_family_indices: &QueueFamilyIndices,
     ) -> Result<CommandPools, VulkanRendererError> {
         unsafe {
+            let graphics_queue_family_index = queue_family_indices.graphics.ok_or_else(|| {
+                VulkanRendererError::VulkanError("Graphics queue family doesn't exist".to_string())
+            })?;
+
             let graphics_command_pool_create_info = vk::CommandPoolCreateInfo {
                 s_type: vk::CommandPoolCreateInfo::STRUCTURE_TYPE,
                 flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-                queue_family_index: queue_family_indices.graphics.ok_or_else(|| {
-                    VulkanRendererError::VulkanError(
-                        "Graphics queue family doesn't exist".to_string(),
-                    )
-                })?,
+                queue_family_index: graphics_queue_family_index,
                 ..Default::default()
             };
             let graphics_command_pool =
                 device.create_command_pool(&graphics_command_pool_create_info, None)?;
 
+            let utility_command_pool_create_info = vk::CommandPoolCreateInfo {
+                s_type: vk::CommandPoolCreateInfo::STRUCTURE_TYPE,
+                flags: vk::CommandPoolCreateFlags::TRANSIENT,
+                queue_family_index: graphics_queue_family_index,
+                ..Default::default()
+            };
+            let utility_command_pool =
+                device.create_command_pool(&utility_command_pool_create_info, None)?;
+
             Ok(CommandPools {
                 graphics: graphics_command_pool,
+                utility: utility_command_pool,
             })
         }
     }
@@ -791,6 +801,7 @@ impl VulkanRenderer {
                 };
 
                 let command_pools = Self::create_command_pools(&device, &queue_family_indices)?;
+                let mut command_buffers = HashMap::default();
 
                 let command_buffer_alloc_info = vk::CommandBufferAllocateInfo {
                     s_type: vk::CommandBufferAllocateInfo::STRUCTURE_TYPE,
@@ -799,10 +810,21 @@ impl VulkanRenderer {
                     command_buffer_count: MAX_FRAMES_IN_FLIGHT,
                     ..Default::default()
                 };
-                let mut command_buffers = HashMap::default();
                 command_buffers.insert(
                     command_pools.graphics,
                     device.allocate_command_buffers(&command_buffer_alloc_info)?,
+                );
+
+                let utility_command_buffer_alloc_info = vk::CommandBufferAllocateInfo {
+                    s_type: vk::CommandBufferAllocateInfo::STRUCTURE_TYPE,
+                    level: vk::CommandBufferLevel::PRIMARY,
+                    command_pool: command_pools.graphics,
+                    command_buffer_count: 1,
+                    ..Default::default()
+                };
+                command_buffers.insert(
+                    command_pools.utility,
+                    device.allocate_command_buffers(&utility_command_buffer_alloc_info)?,
                 );
 
                 Ok(CreateDeviceResult {
@@ -1149,6 +1171,7 @@ impl VulkanRenderer {
                     device.create_semaphore(&semaphore_create_info, None)?;
 
                 let in_flight_fence = device.create_fence(&fence_create_info, None)?;
+                let utility_fence = device.create_fence(&fence_create_info, None)?;
 
                 flows.insert(
                     *command_buffer,
@@ -1156,6 +1179,8 @@ impl VulkanRenderer {
                         image_available_semaphore,
                         render_finished_semaphore,
                         in_flight_fence,
+
+                        utility_fence,
                     },
                 );
             }
@@ -1370,6 +1395,8 @@ impl VulkanRenderer {
                     image_available_semaphore,
                     render_finished_semaphore,
                     in_flight_fence,
+
+                    utility_fence,
                 } = flow_control;
 
                 self.device
@@ -1377,10 +1404,13 @@ impl VulkanRenderer {
                 self.device
                     .destroy_semaphore(render_finished_semaphore, None);
                 self.device.destroy_fence(in_flight_fence, None);
+                self.device.destroy_fence(utility_fence, None);
             }
 
             self.device
                 .destroy_command_pool(self.command_pools.graphics, None);
+            self.device
+                .destroy_command_pool(self.command_pools.utility, None);
             self.command_buffers.clear();
 
             for pipeline in self.pipelines.values() {

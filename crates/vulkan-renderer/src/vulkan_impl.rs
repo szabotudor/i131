@@ -393,6 +393,27 @@ impl VulkanRenderer {
         Ok(())
     }
 
+    fn find_vulkan_format(format: BufferFieldFormat) -> Result<vk::Format, VulkanRendererError> {
+        match format {
+            BufferFieldFormat {
+                kind: ScalarKind::Float,
+                normalized: false,
+                bits_per_component: ComponentBitCount::Two { a: 32, b: 32 },
+            } => Ok(vk::Format::R32G32_SFLOAT),
+            BufferFieldFormat {
+                kind: ScalarKind::Float,
+                normalized: false,
+                bits_per_component:
+                    ComponentBitCount::Three {
+                        r: 32,
+                        g: 32,
+                        b: 32,
+                    },
+            } => Ok(vk::Format::R32G32B32_SFLOAT),
+
+            _ => Err(VulkanRendererError::UnsupportedVertexFormat(format)),
+        }
+    }
     fn find_memory_type_index(
         memory_requirements: vk::MemoryRequirements,
         memory_properties: vk::PhysicalDeviceMemoryProperties,
@@ -415,6 +436,9 @@ impl VulkanRenderer {
         data: BufferCreateInfo,
     ) -> Result<BufferHandle, VulkanRendererError> {
         unsafe {
+            // Find binding requirements, location etc
+            //
+
             let binding = if let Some(binding) = self.freed_buffer_bindings.pop_front() {
                 binding
             } else {
@@ -432,30 +456,14 @@ impl VulkanRenderer {
                 .item_fields
                 .iter()
                 .map(|(buffer_binding, field)| {
-                    let format = match field.format {
-                        BufferFieldFormat {
-                            kind: ScalarKind::Float,
-                            normalized: false,
-                            bits_per_component: ComponentBitCount::Two { a: 32, b: 32 },
-                        } => Ok(vk::Format::R32G32_SFLOAT),
-                        BufferFieldFormat {
-                            kind: ScalarKind::Float,
-                            normalized: false,
-                            bits_per_component:
-                                ComponentBitCount::Three {
-                                    r: 32,
-                                    g: 32,
-                                    b: 32,
-                                },
-                        } => Ok(vk::Format::R32G32B32_SFLOAT),
-
-                        _ => Err(VulkanRendererError::UnsupportedVertexFormat(
-                            field.format.clone(),
-                        )),
-                    }?;
+                    let format = Self::find_vulkan_format(field.format)?;
 
                     let location = match buffer_binding {
-                        renderer131::BufferBinding::Name(name) => todo!("User wants to bind buffer {name} by name.\n Buffer name search in SPIR-V not supported yet"),
+                        renderer131::BufferBinding::Name(name) => {
+                            todo!(
+                                "Cannot bind buffer {name}. Vulkan cannot search buffers by name."
+                            )
+                        }
                         renderer131::BufferBinding::Location(loc) => *loc,
                     };
 
@@ -468,10 +476,62 @@ impl VulkanRenderer {
                 })
                 .collect::<Result<Vec<_>, VulkanRendererError>>()?;
 
+            let memory_properties = self
+                .instance
+                .get_physical_device_memory_properties(self.physical_device);
+
+            // Create staging buffer and upload buffer data to it
+            //
+
+            let staging_buffer_create_info = vk::BufferCreateInfo {
+                s_type: vk::BufferCreateInfo::STRUCTURE_TYPE,
+                size: std::mem::size_of_val(data.data) as u64,
+                usage: vk::BufferUsageFlags::TRANSFER_SRC,
+                sharing_mode: vk::SharingMode::EXCLUSIVE,
+                ..Default::default()
+            };
+
+            let staging_buffer = self
+                .device
+                .create_buffer(&staging_buffer_create_info, None)?;
+
+            let staging_memory_requirements =
+                self.device.get_buffer_memory_requirements(staging_buffer);
+            let staging_memory_type_index = Self::find_memory_type_index(
+                staging_memory_requirements,
+                memory_properties,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )?;
+
+            let staging_alloc_info = vk::MemoryAllocateInfo {
+                s_type: vk::MemoryAllocateInfo::STRUCTURE_TYPE,
+                allocation_size: staging_memory_requirements.size,
+                memory_type_index: staging_memory_type_index,
+                ..Default::default()
+            };
+
+            let staging_device_memory = self.device.allocate_memory(&staging_alloc_info, None)?;
+            self.device
+                .bind_buffer_memory(staging_buffer, staging_device_memory, 0)?;
+
+            let gpu_data = self.device.map_memory(
+                staging_device_memory,
+                0,
+                staging_buffer_create_info.size,
+                vk::MemoryMapFlags::default(),
+            )?;
+            std::ptr::copy_nonoverlapping(data.data.as_ptr(), gpu_data as *mut u8, data.data.len());
+            self.device.unmap_memory(staging_device_memory);
+
+            // Create real buffer and copy staging buffer data into it
+            //
+
             let buffer_create_info = vk::BufferCreateInfo {
                 s_type: vk::BufferCreateInfo::STRUCTURE_TYPE,
                 size: std::mem::size_of_val(data.data) as u64,
-                usage: vk::BufferUsageFlags::VERTEX_BUFFER,
+                usage: match data.usage {
+                    BufferUsage::Vertex => vk::BufferUsageFlags::VERTEX_BUFFER,
+                } | vk::BufferUsageFlags::TRANSFER_DST,
                 sharing_mode: vk::SharingMode::EXCLUSIVE,
                 ..Default::default()
             };
@@ -479,10 +539,6 @@ impl VulkanRenderer {
             let buffer = self.device.create_buffer(&buffer_create_info, None)?;
 
             let memory_requirements = self.device.get_buffer_memory_requirements(buffer);
-            let memory_properties = self
-                .instance
-                .get_physical_device_memory_properties(self.physical_device);
-
             let memory_type_index = Self::find_memory_type_index(
                 memory_requirements,
                 memory_properties,
@@ -499,14 +555,72 @@ impl VulkanRenderer {
             let device_memory = self.device.allocate_memory(&alloc_info, None)?;
             self.device.bind_buffer_memory(buffer, device_memory, 0)?;
 
-            let gpu_data = self.device.map_memory(
-                device_memory,
-                0,
-                buffer_create_info.size,
-                vk::MemoryMapFlags::default(),
+            // Copy staging buffer to real buffer
+            //
+
+            let utility_command_buffer = self
+                .command_buffers
+                .get(&self.command_pools.utility)
+                .and_then(|v| v.iter().next().copied())
+                .ok_or_else(|| {
+                    VulkanRendererError::VulkanError(
+                        "Utility command buffer doesn't exist".to_string(),
+                    )
+                })?;
+
+            let utility_fence = self
+                .flow_control
+                .get(&utility_command_buffer)
+                .ok_or_else(|| {
+                    VulkanRendererError::VulkanError(
+                        "Flow control doesn't exist for expected command buffer".to_string(),
+                    )
+                })?
+                .utility_fence;
+
+            let temp_begin_info = vk::CommandBufferBeginInfo {
+                s_type: vk::CommandBufferBeginInfo::STRUCTURE_TYPE,
+                flags: vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
+                ..Default::default()
+            };
+
+            self.device
+                .begin_command_buffer(utility_command_buffer, &temp_begin_info)?;
+
+            self.device.cmd_copy_buffer(
+                utility_command_buffer,
+                staging_buffer,
+                buffer,
+                &[vk::BufferCopy {
+                    src_offset: 0,
+                    dst_offset: 0,
+                    size: staging_buffer_create_info.size,
+                }],
+            );
+
+            self.device.end_command_buffer(utility_command_buffer)?;
+
+            let temp_submit_info = vk::SubmitInfo {
+                s_type: vk::SubmitInfo::STRUCTURE_TYPE,
+                command_buffer_count: 1,
+                p_command_buffers: &utility_command_buffer,
+                ..Default::default()
+            };
+
+            self.device.queue_submit(
+                self.device_queues.graphics.unwrap(),
+                &[temp_submit_info],
+                utility_fence,
             )?;
-            std::ptr::copy_nonoverlapping(data.data.as_ptr(), gpu_data as *mut u8, data.data.len());
-            self.device.unmap_memory(device_memory);
+
+            self.device
+                .wait_for_fences(&[utility_fence], true, u64::MAX)?;
+            self.device.reset_fences(&[utility_fence])?;
+
+            self.device.destroy_buffer(staging_buffer, None);
+            self.device.free_memory(staging_device_memory, None);
+
+            // Finally assign to handle
 
             let buffer_handle = self.buffers.insert(VulkanBufferData {
                 usage: data.usage,
@@ -655,6 +769,9 @@ impl VulkanRenderer {
                 image_available_semaphore,
                 render_finished_semaphore,
                 in_flight_fence,
+
+                #[expect(unused_variables, reason = "No utility operations during execute")]
+                utility_fence,
             } = *self.flow_control.get(&command_buffer).ok_or_else(|| {
                 VulkanRendererError::VulkanError(
                     "Flow control doesn't exist for expected command buffer".to_string(),
