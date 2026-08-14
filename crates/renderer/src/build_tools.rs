@@ -190,6 +190,7 @@ impl ShaderSources {
                         format!("Couldn't read shader from file '{}'", meta.file.display()),
                     )
                 })?;
+                println!("cargo:rerun-if-changed={}", meta.file.display());
 
                 acc.entry(meta.backend).or_default().insert(
                     name,
