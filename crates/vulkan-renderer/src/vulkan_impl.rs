@@ -1,16 +1,17 @@
+use crate::{
+    FlowControl, MAX_FRAMES_IN_FLIGHT, VulkanBufferData, VulkanPipelineData, VulkanRenderer,
+    VulkanRendererError, VulkanShaderData,
+};
+use ash::vk::{self, TaggedStructure};
+use renderer131::{
+    BufferCreateInfo, BufferFieldFormat, BufferHandle, BufferUsage, ComponentBitCount, DrawCall,
+    ProgramHandle, ScalarKind, Settings, ShaderCreateInfo, ShaderHandle,
+};
 use std::{
     ffi::CString,
     hash::{DefaultHasher, Hash, Hasher},
     ptr::{null, null_mut},
     str::FromStr,
-};
-
-use ash::vk::{self, TaggedStructure};
-use renderer131::{ProgramHandle, Settings, ShaderCreateInfo, ShaderHandle};
-
-use crate::{
-    FlowControl, MAX_FRAMES_IN_FLIGHT, VulkanPipelineData, VulkanRenderer, VulkanRendererError,
-    VulkanShaderData,
 };
 
 impl VulkanRenderer {
@@ -29,12 +30,30 @@ impl VulkanRenderer {
 
         hash as usize
     }
-    fn pipeline_hash(shaders: &[ShaderHandle], settings: &Settings) -> usize {
+    fn vertex_buffers_hash(vertex_buffers: &[BufferHandle]) -> usize {
         let mut hasher = DefaultHasher::new();
+        for buffer in vertex_buffers {
+            buffer.hash(&mut hasher);
+        }
+        let hash = hasher.finish();
+
+        hash as usize
+    }
+    fn pipeline_hash(
+        shaders: &[ShaderHandle],
+        vertex_buffers: &[BufferHandle],
+        settings: &Settings,
+    ) -> usize {
+        let mut hasher = DefaultHasher::new();
+
+        let settings_hash = Self::settings_hash(settings);
+        settings_hash.hash(&mut hasher);
 
         let shader_hash = Self::shaders_hash(shaders);
         shader_hash.hash(&mut hasher);
-        Self::settings_hash(settings).hash(&mut hasher);
+
+        let vertex_buffers_hash = Self::vertex_buffers_hash(vertex_buffers);
+        vertex_buffers_hash.hash(&mut hasher);
 
         let hash = hasher.finish();
 
@@ -44,12 +63,13 @@ impl VulkanRenderer {
     unsafe fn get_or_create_pipeline(
         &mut self,
         program: ProgramHandle,
+        vertex_buffers: &[BufferHandle],
     ) -> Result<usize, VulkanRendererError> {
         let (shaders, pipelines) = self.programs.get_mut(&program).ok_or_else(|| {
             VulkanRendererError::VulkanError(format!("Program {program:?} doesn't exist"))
         })?;
 
-        let hash = Self::pipeline_hash(shaders, &self.settings);
+        let hash = Self::pipeline_hash(shaders, vertex_buffers, &self.settings);
 
         if self.pipelines.contains_key(&hash) {
             return Ok(hash);
@@ -58,7 +78,7 @@ impl VulkanRenderer {
         let shaders = shaders.clone();
 
         pipelines.push(hash);
-        let pipeline = unsafe { self.create_pipeline_and_dynamic_state(&shaders)? };
+        let pipeline = unsafe { self.create_pipeline_and_dynamic_state(&shaders, vertex_buffers)? };
         self.pipelines.insert(hash, pipeline);
 
         Ok(hash)
@@ -67,6 +87,7 @@ impl VulkanRenderer {
     unsafe fn create_pipeline_and_dynamic_state(
         &mut self,
         shaders: &[ShaderHandle],
+        vertex_buffers: &[BufferHandle],
     ) -> Result<VulkanPipelineData, VulkanRendererError> {
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
 
@@ -77,12 +98,35 @@ impl VulkanRenderer {
             ..Default::default()
         };
 
+        let (vertex_buffer_bindings, vertex_buffer_attributes) = vertex_buffers
+            .iter()
+            .filter_map(|buffer| {
+                let buffer = self.buffers.get(*buffer)?;
+
+                if buffer.usage != BufferUsage::Vertex {
+                    return None;
+                }
+
+                Some((
+                    buffer.binding_description,
+                    buffer.attribute_descriptions.clone(),
+                ))
+            })
+            .fold(
+                (Vec::default(), Vec::default()),
+                |(mut acc_bind, mut acc_attr), (bind, attr)| {
+                    acc_bind.push(bind);
+                    acc_attr.extend_from_slice(&attr);
+                    (acc_bind, acc_attr)
+                },
+            );
+
         let vertex_input_create_info = vk::PipelineVertexInputStateCreateInfo {
             s_type: vk::PipelineVertexInputStateCreateInfo::STRUCTURE_TYPE,
-            vertex_binding_description_count: 0,
-            p_vertex_binding_descriptions: null(),
-            vertex_attribute_description_count: 0,
-            p_vertex_attribute_descriptions: null(),
+            vertex_binding_description_count: vertex_buffer_bindings.len() as u32,
+            p_vertex_binding_descriptions: vertex_buffer_bindings.as_ptr(),
+            vertex_attribute_description_count: vertex_buffer_attributes.len() as u32,
+            p_vertex_attribute_descriptions: vertex_buffer_attributes.as_ptr(),
             ..Default::default()
         };
 
@@ -184,7 +228,7 @@ impl VulkanRenderer {
             .map(|shader| {
                 let info = self
                     .shaders
-                    .get(shader)
+                    .get(*shader)
                     .ok_or(VulkanRendererError::VulkanError(format!(
                         "Shader {shader:?} doesn't exist"
                     )))?;
@@ -268,18 +312,13 @@ impl VulkanRenderer {
                         .device
                         .create_shader_module(&shader_module_create_info, None)?;
 
-                    let shader_handle = self.shader_handles;
-                    self.shaders.insert(
-                        ShaderHandle::from_raw(shader_handle),
-                        VulkanShaderData {
-                            shader_module,
-                            stage: info.stage,
-                            name: CString::from_str(&info.name)?,
-                        },
-                    );
-                    self.shader_handles += 1;
+                    let shader_handle = self.shaders.insert(VulkanShaderData {
+                        shader_module,
+                        stage: info.stage,
+                        name: CString::from_str(&info.name)?,
+                    });
 
-                    Ok(ShaderHandle::from_raw(shader_handle))
+                    Ok(shader_handle)
                 })
                 .collect::<Result<Vec<_>, VulkanRendererError>>()?;
 
@@ -295,11 +334,9 @@ impl VulkanRenderer {
             let shader_metas = shaders
                 .iter()
                 .map(|handle| {
-                    self.shaders.get(handle).ok_or_else(|| {
-                        VulkanRendererError::VulkanError(format!(
-                            "Shader {handle:?} doesn't exist."
-                        ))
-                    })
+                    self.shaders
+                        .get(*handle)
+                        .ok_or_else(|| VulkanRendererError::NonexistantShader(*handle))
                 })
                 .collect::<Result<Vec<&VulkanShaderData>, VulkanRendererError>>()?;
 
@@ -309,7 +346,7 @@ impl VulkanRenderer {
             }
 
             for shader in shaders {
-                self.shaders.remove(shader);
+                self.shaders.remove(*shader);
             }
 
             Ok(())
@@ -356,20 +393,157 @@ impl VulkanRenderer {
         Ok(())
     }
 
-    unsafe fn record_command_buffer(
+    fn find_memory_type_index(
+        memory_requirements: vk::MemoryRequirements,
+        memory_properties: vk::PhysicalDeviceMemoryProperties,
+        property_flags: vk::MemoryPropertyFlags,
+    ) -> Result<u32, VulkanRendererError> {
+        for i in 0..memory_properties.memory_type_count {
+            if (memory_requirements.memory_type_bits & (1 << i)) != 0
+                && (memory_properties.memory_types[i as usize].property_flags & property_flags)
+                    .as_raw()
+                    != 0
+            {
+                return Ok(i);
+            }
+        }
+
+        Err(VulkanRendererError::NoSupportedMemoryLayouts)
+    }
+    pub(crate) unsafe fn create_buffer_impl(
         &mut self,
-        program: ProgramHandle,
+        data: BufferCreateInfo,
+    ) -> Result<BufferHandle, VulkanRendererError> {
+        unsafe {
+            let binding = if let Some(binding) = self.freed_buffer_bindings.pop_front() {
+                binding
+            } else {
+                self.buffer_bindings += 1;
+                self.buffer_bindings - 1
+            };
+
+            let binding_description = vk::VertexInputBindingDescription {
+                binding: binding as u32,
+                stride: data.item_stride as u32,
+                input_rate: vk::VertexInputRate::VERTEX,
+            };
+
+            let attribute_descriptions = data
+                .item_fields
+                .iter()
+                .map(|(buffer_binding, field)| {
+                    let format = match field.format {
+                        BufferFieldFormat {
+                            kind: ScalarKind::Float,
+                            normalized: false,
+                            bits_per_component: ComponentBitCount::Two { a: 32, b: 32 },
+                        } => Ok(vk::Format::R32G32_SFLOAT),
+                        BufferFieldFormat {
+                            kind: ScalarKind::Float,
+                            normalized: false,
+                            bits_per_component:
+                                ComponentBitCount::Three {
+                                    r: 32,
+                                    g: 32,
+                                    b: 32,
+                                },
+                        } => Ok(vk::Format::R32G32B32_SFLOAT),
+
+                        _ => Err(VulkanRendererError::UnsupportedVertexFormat(
+                            field.format.clone(),
+                        )),
+                    }?;
+
+                    let location = match buffer_binding {
+                        renderer131::BufferBinding::Name(name) => todo!("User wants to bind buffer {name} by name.\n Buffer name search in SPIR-V not supported yet"),
+                        renderer131::BufferBinding::Location(loc) => *loc,
+                    };
+
+                    Ok(vk::VertexInputAttributeDescription {
+                        binding: binding as u32,
+                        location: location as u32,
+                        format,
+                        offset: field.offset_in_item as u32,
+                    })
+                })
+                .collect::<Result<Vec<_>, VulkanRendererError>>()?;
+
+            let buffer_create_info = vk::BufferCreateInfo {
+                s_type: vk::BufferCreateInfo::STRUCTURE_TYPE,
+                size: std::mem::size_of_val(data.data) as u64,
+                usage: vk::BufferUsageFlags::VERTEX_BUFFER,
+                sharing_mode: vk::SharingMode::EXCLUSIVE,
+                ..Default::default()
+            };
+
+            let buffer = self.device.create_buffer(&buffer_create_info, None)?;
+
+            let memory_requirements = self.device.get_buffer_memory_requirements(buffer);
+            let memory_properties = self
+                .instance
+                .get_physical_device_memory_properties(self.physical_device);
+
+            let memory_type_index = Self::find_memory_type_index(
+                memory_requirements,
+                memory_properties,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )?;
+
+            let alloc_info = vk::MemoryAllocateInfo {
+                s_type: vk::MemoryAllocateInfo::STRUCTURE_TYPE,
+                allocation_size: memory_requirements.size,
+                memory_type_index,
+                ..Default::default()
+            };
+
+            let device_memory = self.device.allocate_memory(&alloc_info, None)?;
+            self.device.bind_buffer_memory(buffer, device_memory, 0)?;
+
+            let gpu_data = self.device.map_memory(
+                device_memory,
+                0,
+                buffer_create_info.size,
+                vk::MemoryMapFlags::default(),
+            )?;
+            std::ptr::copy_nonoverlapping(data.data.as_ptr(), gpu_data as *mut u8, data.data.len());
+            self.device.unmap_memory(device_memory);
+
+            let buffer_handle = self.buffers.insert(VulkanBufferData {
+                usage: data.usage,
+                binding_description,
+                attribute_descriptions,
+                buffer,
+                device_memory,
+            });
+
+            Ok(buffer_handle)
+        }
+    }
+
+    pub(crate) unsafe fn destroy_buffer_impl(
+        &mut self,
+        buffer: BufferHandle,
+    ) -> Result<(), VulkanRendererError> {
+        let buffer = self
+            .buffers
+            .remove(buffer)
+            .ok_or_else(|| VulkanRendererError::NonexistantBuffer(buffer))?;
+
+        unsafe {
+            self.device.destroy_buffer(buffer.buffer, None);
+            self.device.free_memory(buffer.device_memory, None);
+        }
+
+        Ok(())
+    }
+
+    unsafe fn record_command_buffer(
+        &self,
+        pipeline: &VulkanPipelineData,
         command_buffer: vk::CommandBuffer,
         image_index: usize,
     ) -> Result<vk::CommandBuffer, VulkanRendererError> {
         unsafe {
-            let pipeline = self.get_or_create_pipeline(program)?;
-            let pipeline = self.pipelines.get(&pipeline).ok_or_else(|| {
-                VulkanRendererError::VulkanError(format!(
-                    "Pipeline doesn't exist for program {program:?}"
-                ))
-            })?;
-
             self.device.reset_command_buffer(
                 command_buffer,
                 vk::CommandBufferResetFlags::RELEASE_RESOURCES,
@@ -436,6 +610,15 @@ impl VulkanRenderer {
             };
             self.device.cmd_set_scissor(command_buffer, 0, &[scissor]);
 
+            let buffers = self
+                .buffers
+                .iter()
+                .map(|(_, buffer)| buffer.buffer)
+                .collect::<Vec<_>>();
+            let offsets = vec![0u64; buffers.len()];
+            self.device
+                .cmd_bind_vertex_buffers(command_buffer, 0, &buffers, &offsets);
+
             self.device.cmd_draw(command_buffer, 3, 1, 0, 0);
             // TODO: Draw commands
 
@@ -446,9 +629,10 @@ impl VulkanRenderer {
         }
     }
 
-    pub(crate) unsafe fn execute_impl(
+    pub(crate) unsafe fn execute_draw_impl(
         &mut self,
         program: ProgramHandle,
+        vertex_buffers: &[BufferHandle],
     ) -> Result<(), VulkanRendererError> {
         // TODO: Should find a better way to recreate swapchain that doesn't force the user into
         // specific code flow
@@ -515,8 +699,15 @@ impl VulkanRenderer {
 
             self.device.reset_fences(&[in_flight_fence])?;
 
+            let pipeline = self.get_or_create_pipeline(program, vertex_buffers)?;
+            let pipeline = self.pipelines.get(&pipeline).ok_or_else(|| {
+                VulkanRendererError::VulkanError(format!(
+                    "Pipeline doesn't exist for program {program:?}"
+                ))
+            })?;
+
             let command_buffer =
-                self.record_command_buffer(program, command_buffer, image_index as usize)?;
+                self.record_command_buffer(pipeline, command_buffer, image_index as usize)?;
 
             let wait_semaphores = [image_available_semaphore];
             let signal_semaphores = [render_finished_semaphore];
@@ -571,5 +762,21 @@ impl VulkanRenderer {
 
             Ok(())
         }
+    }
+
+    pub(crate) unsafe fn execute_impl(
+        &mut self,
+        draw_call: DrawCall,
+    ) -> Result<(), VulkanRendererError> {
+        match draw_call {
+            DrawCall::Draw {
+                program,
+                vertex_buffers,
+            } => {
+                unsafe { self.execute_draw_impl(program, &vertex_buffers)? };
+            }
+        }
+
+        Ok(())
     }
 }

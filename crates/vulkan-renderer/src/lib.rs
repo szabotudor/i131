@@ -1,3 +1,4 @@
+use crate::vulkan_init::SwapchainSupportDetails;
 use ash::{Device, Entry, Instance, LoadingError, vk};
 use math131::Vec2i32;
 #[cfg(feature = "GLFW")]
@@ -5,21 +6,20 @@ use raw_window_handle::HandleError;
 #[cfg(feature = "GLFW")]
 use renderer131::RendererError;
 use renderer131::{
+    BufferCreateInfo, BufferFieldFormat, BufferHandle, BufferUsage, DrawCall, HandleMap,
     ProgramHandle, Renderer, RendererInstanceError, Settings, ShaderCreateInfo, ShaderHandle,
     ShaderStage,
 };
 #[cfg(feature = "GLFW")]
 use std::{cell::RefCell, rc::Rc};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     ffi::{CString, NulError, c_void},
     sync::{Arc, RwLock},
 };
 use thiserror::Error;
 #[cfg(feature = "GLFW")]
 use window131::{Window, WindowDataGLFW};
-
-use crate::vulkan_init::SwapchainSupportDetails;
 
 pub mod build_tools;
 mod vulkan_impl;
@@ -57,8 +57,20 @@ pub enum VulkanRendererError {
     #[error("Chosen devise is missing required queue family support for \"{0}\"")]
     MissingQueue(String),
 
+    #[error("Shader handle {0:?} doesn't exist")]
+    NonexistantShader(ShaderHandle),
+
+    #[error("Buffer handle {0:?} doesn't exist")]
+    NonexistantBuffer(BufferHandle),
+
+    #[error("Could not find a supported memory layout for buffer")]
+    NoSupportedMemoryLayouts,
+
     #[error("There are no physical devices that support vulkan")]
     NoSupportedDevices,
+
+    #[error("Requested vertex format isn't supported by Vulkan backend: {0:?}")]
+    UnsupportedVertexFormat(BufferFieldFormat),
 
     #[error("No valid surface formats found")]
     NoValidSurfaceFormat,
@@ -160,6 +172,13 @@ struct VulkanShaderData {
     )]
     name: CString,
 }
+struct VulkanBufferData {
+    usage: BufferUsage,
+    binding_description: vk::VertexInputBindingDescription,
+    attribute_descriptions: Vec<vk::VertexInputAttributeDescription>,
+    buffer: vk::Buffer,
+    device_memory: vk::DeviceMemory,
+}
 struct VulkanPipelineData {
     pipeline: vk::Pipeline,
     layout: vk::PipelineLayout,
@@ -179,6 +198,7 @@ pub struct VulkanRenderer {
     _entry: Entry,
     instance: Instance,
     instance_extensions: InstanceExtensions,
+    physical_device: vk::PhysicalDevice,
     device: Device,
     device_queues: DeviceQueues,
     queue_family_indices: QueueFamilyIndices,
@@ -195,12 +215,15 @@ pub struct VulkanRenderer {
     programs: HashMap<ProgramHandle, (Vec<ShaderHandle>, Vec<usize>)>,
     pipelines: HashMap<usize, VulkanPipelineData>,
     render_pass: vk::RenderPass,
-    shader_handles: usize,
-    shaders: HashMap<ShaderHandle, VulkanShaderData>,
+    shaders: HandleMap<ShaderHandle, VulkanShaderData>,
+    buffers: HandleMap<BufferHandle, VulkanBufferData>,
     settings: Settings,
 
     flow_control: HashMap<vk::CommandBuffer, FlowControl>,
     current_frame: usize,
+
+    buffer_bindings: usize,
+    freed_buffer_bindings: VecDeque<usize>,
 }
 unsafe impl Send for VulkanRenderer {}
 unsafe impl Sync for VulkanRenderer {}
@@ -263,7 +286,14 @@ impl Renderer for VulkanRenderer {
         unsafe { Ok(self.destroy_program_impl(program)?) }
     }
 
-    fn execute(&mut self, program: ProgramHandle) -> Result<(), RendererError> {
-        unsafe { Ok(self.execute_impl(program)?) }
+    fn create_buffer(&mut self, data: BufferCreateInfo) -> Result<BufferHandle, RendererError> {
+        unsafe { Ok(self.create_buffer_impl(data)?) }
+    }
+    fn destroy_buffer(&mut self, vertex_buffer: BufferHandle) -> Result<(), RendererError> {
+        unsafe { Ok(self.destroy_buffer_impl(vertex_buffer)?) }
+    }
+
+    fn execute(&mut self, draw_call: DrawCall) -> Result<(), RendererError> {
+        unsafe { Ok(self.execute_impl(draw_call)?) }
     }
 }

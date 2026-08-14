@@ -1,9 +1,11 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, mem::offset_of, rc::Rc};
 
 use engine131::{
-    math131::Vec2u32,
+    math131::{Vec2f32, Vec2u32, Vec3f32},
     renderer131::{
-        ProgramHandle, Renderer, RendererError, ShaderCreateInfo, ShaderHandle, ShaderStage,
+        BufferBinding, BufferCreateInfo, BufferFieldFormat, BufferHandle, BufferUsage,
+        ComponentBitCount, DrawCall, ProgramHandle, Renderer, RendererError, ScalarKind,
+        ShaderCreateInfo, ShaderHandle, ShaderStage,
     },
     systems::{System, SystemContext, SystemId},
     window131::{Window, WindowError, WindowMode, WindowSettings},
@@ -29,6 +31,7 @@ pub(crate) struct Editor {
     vert: ShaderHandle,
     frag: ShaderHandle,
     prog: ProgramHandle,
+    vertices: BufferHandle,
 }
 unsafe impl Send for Editor {}
 unsafe impl Sync for Editor {}
@@ -58,8 +61,15 @@ impl Editor {
             vert: ShaderHandle::null(),
             frag: ShaderHandle::null(),
             prog: ProgramHandle::null(),
+            vertices: BufferHandle::null(),
         })
     }
+}
+
+#[repr(C)]
+struct Vertex {
+    pub pos: Vec2f32,
+    pub col: Vec3f32,
 }
 
 impl System for Editor {
@@ -94,6 +104,44 @@ impl System for Editor {
 
         self.prog = default_prog;
 
+        let vertices = [
+            ((0.0, -0.5), (1.0, 1.0, 1.0)),
+            ((0.5, 0.5), (0.0, 1.0, 0.0)),
+            ((-0.5, 0.5), (0.0, 0.0, 1.0)),
+        ]
+        .map(|(v, c)| Vertex {
+            pos: Vec2f32::new(v.0, v.1),
+            col: Vec3f32::new(c.0, c.1, c.2),
+        });
+
+        let handle = self.renderer.create_buffer(
+            BufferCreateInfo::new(BufferUsage::Vertex, &vertices)
+                .with_field::<Vec2f32>(
+                    BufferBinding::Location(0),
+                    offset_of!(Vertex, pos),
+                    BufferFieldFormat {
+                        kind: ScalarKind::Float,
+                        normalized: false,
+                        bits_per_component: ComponentBitCount::Two { a: 32, b: 32 },
+                    },
+                )
+                .with_field::<Vec2f32>(
+                    BufferBinding::Location(1),
+                    offset_of!(Vertex, col),
+                    BufferFieldFormat {
+                        kind: ScalarKind::Float,
+                        normalized: false,
+                        bits_per_component: ComponentBitCount::Three {
+                            r: 32,
+                            g: 32,
+                            b: 32,
+                        },
+                    },
+                ),
+        )?;
+
+        self.vertices = handle;
+
         Ok(())
     }
 
@@ -114,7 +162,10 @@ impl System for Editor {
 
         drop(window);
 
-        self.renderer.execute(self.prog)?;
+        self.renderer.execute(DrawCall::Draw {
+            program: self.prog,
+            vertex_buffers: vec![self.vertices],
+        })?;
 
         Ok(())
     }

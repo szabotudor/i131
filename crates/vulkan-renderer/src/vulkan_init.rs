@@ -47,7 +47,6 @@ struct CreateSwapchainArgs<'a> {
 }
 
 struct CreateDeviceResult {
-    #[expect(dead_code, reason = "Not needed besides metadata")]
     physical_device: vk::PhysicalDevice,
     device: Device,
     queue_family_indices: QueueFamilyIndices,
@@ -1173,9 +1172,9 @@ impl VulkanRenderer {
         enable_validation: ValidationLevel,
     ) -> Result<Self, VulkanRendererError> {
         unsafe {
-            use std::collections::HashMap;
+            use std::collections::{HashMap, VecDeque};
 
-            use renderer131::Settings;
+            use renderer131::{HandleMap, Settings};
 
             let mut raw_window = window.borrow_mut();
             let glfw = raw_window.get_glfw_data_mut();
@@ -1222,7 +1221,7 @@ impl VulkanRenderer {
             let surface = Self::create_surface_glfw(&instance, &instance_extensions, glfw)?;
 
             let CreateDeviceResult {
-                physical_device: _,
+                physical_device,
                 device,
                 queue_family_indices,
                 device_queues,
@@ -1263,6 +1262,7 @@ impl VulkanRenderer {
                 _entry: entry,
                 instance,
                 instance_extensions,
+                physical_device,
                 device,
                 device_queues,
                 queue_family_indices,
@@ -1277,12 +1277,15 @@ impl VulkanRenderer {
                 programs: HashMap::default(),
                 pipelines: HashMap::default(),
                 render_pass,
-                shader_handles: 0usize,
-                shaders: HashMap::default(),
+                shaders: HandleMap::default(),
+                buffers: HandleMap::default(),
                 settings: Settings::default(),
 
                 flow_control,
                 current_frame: 0,
+
+                buffer_bindings: 0,
+                freed_buffer_bindings: VecDeque::default(),
             };
 
             renderer.recreate_swapchain()?;
@@ -1389,11 +1392,17 @@ impl VulkanRenderer {
             self.device.destroy_render_pass(self.render_pass, None);
             self.render_pass = vk::RenderPass::null();
 
-            for shader in self.shaders.values() {
+            for (_, shader) in self.shaders.iter() {
                 self.device
                     .destroy_shader_module(shader.shader_module, None);
             }
             self.shaders.clear();
+
+            for (_, buffer) in self.buffers.iter() {
+                self.device.destroy_buffer(buffer.buffer, None);
+                self.device.free_memory(buffer.device_memory, None);
+            }
+            self.buffers.clear();
 
             self.destroy_swapchain()?;
 
