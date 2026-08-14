@@ -14,6 +14,45 @@ use std::{
     str::FromStr,
 };
 
+macro_rules! vk_format_table {
+    (
+        uniform {
+            $( ($kind:ident, $norm:literal, $width:literal x $count:literal) => $variant:ident; )*
+        }
+        packed {
+            $( ($kind_p:ident, $norm_p:literal, [$($bit:literal),+]) => $variant_p:ident; )*
+        }
+    ) => {
+        fn find_vulkan_format(format: BufferFieldFormat) -> Result<vk::Format, VulkanRendererError> {
+            let bits: Vec<u8> = match &format.bits_per_component {
+                ComponentBitCount::Scalar(a) => vec![*a],
+                ComponentBitCount::Two { a, b } => vec![*a, *b],
+                ComponentBitCount::Three { r, g, b } => vec![*r, *g, *b],
+                ComponentBitCount::Four { r, g, b, a } => vec![*r, *g, *b, *a],
+            };
+
+            // Packed formats are order-sensitive and width-mixed — matched first,
+            // as an exact slice pattern per component.
+            match (format.kind, format.normalized, bits.as_slice()) {
+                $( (ScalarKind::$kind_p, $norm_p, [$($bit),+]) => return Ok(vk::Format::$variant_p), )*
+                _ => {}
+            }
+
+            // Uniform formats: every component the same width, matched by (kind, norm, width, count).
+            if let Some(&width) = bits.first() {
+                if bits.iter().all(|&b| b == width) {
+                    match (format.kind, format.normalized, width, bits.len()) {
+                        $( (ScalarKind::$kind, $norm, $width, $count) => return Ok(vk::Format::$variant), )*
+                        _ => {}
+                    }
+                }
+            }
+
+            Err(VulkanRendererError::UnsupportedVertexFormat(format))
+        }
+    };
+}
+
 impl VulkanRenderer {
     fn settings_hash(settings: &Settings) -> usize {
         let mut hasher = DefaultHasher::new();
@@ -393,25 +432,90 @@ impl VulkanRenderer {
         Ok(())
     }
 
-    fn find_vulkan_format(format: BufferFieldFormat) -> Result<vk::Format, VulkanRendererError> {
-        match format {
-            BufferFieldFormat {
-                kind: ScalarKind::Float,
-                normalized: false,
-                bits_per_component: ComponentBitCount::Two { a: 32, b: 32 },
-            } => Ok(vk::Format::R32G32_SFLOAT),
-            BufferFieldFormat {
-                kind: ScalarKind::Float,
-                normalized: false,
-                bits_per_component:
-                    ComponentBitCount::Three {
-                        r: 32,
-                        g: 32,
-                        b: 32,
-                    },
-            } => Ok(vk::Format::R32G32B32_SFLOAT),
+    // fn find_vulkan_format(format: BufferFieldFormat) -> Result<vk::Format, VulkanRendererError> {
+    //     match format {
+    //         BufferFieldFormat {
+    //             kind: ScalarKind::Float,
+    //             normalized: false,
+    //             bits_per_component: ComponentBitCount::Two { a: 32, b: 32 },
+    //         } => Ok(vk::Format::R32G32_SFLOAT),
+    //         BufferFieldFormat {
+    //             kind: ScalarKind::Float,
+    //             normalized: false,
+    //             bits_per_component:
+    //                 ComponentBitCount::Three {
+    //                     r: 32,
+    //                     g: 32,
+    //                     b: 32,
+    //                 },
+    //         } => Ok(vk::Format::R32G32B32_SFLOAT),
+    //
+    //         _ => Err(VulkanRendererError::UnsupportedVertexFormat(format)),
+    //     }
+    // }
 
-            _ => Err(VulkanRendererError::UnsupportedVertexFormat(format)),
+    vk_format_table! {
+        uniform {
+            (Float, false, 32 x 1) => R32_SFLOAT;
+            (Float, false, 32 x 2) => R32G32_SFLOAT;
+            (Float, false, 32 x 3) => R32G32B32_SFLOAT;
+            (Float, false, 32 x 4) => R32G32B32A32_SFLOAT;
+
+            (Float, false, 64 x 1) => R64_SFLOAT;
+            (Float, false, 64 x 2) => R64G64_SFLOAT;
+            (Float, false, 64 x 3) => R64G64B64_SFLOAT;
+            (Float, false, 64 x 4) => R64G64B64A64_SFLOAT;
+
+            (UInt, false, 8 x 1) => R8_UINT;
+            (UInt, false, 8 x 2) => R8G8_UINT;
+            (UInt, false, 8 x 3) => R8G8B8_UINT;
+            (UInt, false, 8 x 4) => R8G8B8A8_UINT;
+            (UInt, true,  8 x 1) => R8_UNORM;
+            (UInt, true,  8 x 2) => R8G8_UNORM;
+            (UInt, true,  8 x 3) => R8G8B8_UNORM;
+            (UInt, true,  8 x 4) => R8G8B8A8_UNORM;
+
+            (SInt, false, 8 x 1) => R8_SINT;
+            (SInt, false, 8 x 2) => R8G8_SINT;
+            (SInt, false, 8 x 3) => R8G8B8_SINT;
+            (SInt, false, 8 x 4) => R8G8B8A8_SINT;
+            (SInt, true,  8 x 1) => R8_SNORM;
+            (SInt, true,  8 x 2) => R8G8_SNORM;
+            (SInt, true,  8 x 3) => R8G8B8_SNORM;
+            (SInt, true,  8 x 4) => R8G8B8A8_SNORM;
+
+            (UInt, false, 16 x 1) => R16_UINT;
+            (UInt, false, 16 x 2) => R16G16_UINT;
+            (UInt, false, 16 x 3) => R16G16B16_UINT;
+            (UInt, false, 16 x 4) => R16G16B16A16_UINT;
+            (UInt, true,  16 x 1) => R16_UNORM;
+            (UInt, true,  16 x 2) => R16G16_UNORM;
+            (UInt, true,  16 x 3) => R16G16B16_UNORM;
+            (UInt, true,  16 x 4) => R16G16B16A16_UNORM;
+
+            (SInt, false, 16 x 1) => R16_SINT;
+            (SInt, false, 16 x 2) => R16G16_SINT;
+            (SInt, false, 16 x 3) => R16G16B16_SINT;
+            (SInt, false, 16 x 4) => R16G16B16A16_SINT;
+            (SInt, true,  16 x 1) => R16_SNORM;
+            (SInt, true,  16 x 2) => R16G16_SNORM;
+            (SInt, true,  16 x 3) => R16G16B16_SNORM;
+            (SInt, true,  16 x 4) => R16G16B16A16_SNORM;
+
+            (UInt, false, 32 x 1) => R32_UINT;
+            (UInt, false, 32 x 2) => R32G32_UINT;
+            (UInt, false, 32 x 3) => R32G32B32_UINT;
+            (UInt, false, 32 x 4) => R32G32B32A32_UINT;
+            (SInt, false, 32 x 1) => R32_SINT;
+            (SInt, false, 32 x 2) => R32G32_SINT;
+            (SInt, false, 32 x 3) => R32G32B32_SINT;
+            (SInt, false, 32 x 4) => R32G32B32A32_SINT;
+        }
+        packed {
+            (UInt, true, [5, 6, 5])     => R5G6B5_UNORM_PACK16;
+            (UInt, true, [5, 5, 5, 1])  => R5G5B5A1_UNORM_PACK16;
+            (UInt, true, [10, 10, 10, 2]) => A2B10G10R10_UNORM_PACK32;
+            (UInt, false, [10, 10, 10, 2]) => A2B10G10R10_UINT_PACK32;
         }
     }
     fn find_memory_type_index(
@@ -577,6 +681,8 @@ impl VulkanRenderer {
                     )
                 })?
                 .utility_fence;
+
+            self.device.reset_fences(&[utility_fence])?;
 
             let temp_begin_info = vk::CommandBufferBeginInfo {
                 s_type: vk::CommandBufferBeginInfo::STRUCTURE_TYPE,
