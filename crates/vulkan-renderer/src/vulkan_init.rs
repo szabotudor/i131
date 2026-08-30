@@ -46,6 +46,12 @@ struct CreateSwapchainArgs<'a> {
     extent: vk::Extent2D,
 }
 
+#[derive(Default)]
+struct DeviceSuitabilityResult {
+    score: i32,
+    queue_family_indices: QueueFamilyIndices,
+    swapchain_details: SwapchainSupportDetails,
+}
 struct CreateDeviceResult {
     physical_device: vk::PhysicalDevice,
     device: Device,
@@ -446,7 +452,7 @@ impl VulkanRenderer {
         instance_extensions: &InstanceExtensions,
         physical_device: vk::PhysicalDevice,
         surface: vk::SurfaceKHR,
-    ) -> Result<(i32, QueueFamilyIndices, SwapchainSupportDetails), VulkanRendererError> {
+    ) -> Result<DeviceSuitabilityResult, VulkanRendererError> {
         unsafe {
             let device_properties = instance.get_physical_device_properties(physical_device);
             #[expect(unused_variables, reason = "No feature checks yet")]
@@ -465,19 +471,11 @@ impl VulkanRenderer {
                 Self::get_swapchain_details(instance_extensions, physical_device, surface)?;
 
             if swapchain_details.formats.is_empty() || swapchain_details.present_modes.is_empty() {
-                return Ok((
-                    0,
-                    QueueFamilyIndices::default(),
-                    SwapchainSupportDetails::default(),
-                ));
+                return Ok(DeviceSuitabilityResult::default());
             }
 
             if !device_supports_required_extensions {
-                return Ok((
-                    0,
-                    QueueFamilyIndices::default(),
-                    SwapchainSupportDetails::default(),
-                ));
+                return Ok(DeviceSuitabilityResult::default());
             }
 
             let score = if (device_properties.device_type.as_raw()
@@ -496,24 +494,20 @@ impl VulkanRenderer {
             {
                 3
             } else {
-                return Ok((
-                    0,
-                    QueueFamilyIndices::default(),
-                    SwapchainSupportDetails::default(),
-                ));
+                return Ok(DeviceSuitabilityResult::default());
             };
 
             let queue_family_indices =
                 Self::find_queue_families(instance, instance_extensions, physical_device, surface)?;
             if queue_family_indices.graphics.is_none() {
-                return Ok((
-                    0,
-                    QueueFamilyIndices::default(),
-                    SwapchainSupportDetails::default(),
-                ));
+                return Ok(DeviceSuitabilityResult::default());
             }
 
-            Ok((score, queue_family_indices, swapchain_details))
+            Ok(DeviceSuitabilityResult {
+                score,
+                queue_family_indices,
+                swapchain_details,
+            })
         }
     }
 
@@ -693,82 +687,44 @@ impl VulkanRenderer {
                 })
                 .collect::<Result<Vec<_>, VulkanRendererError>>()?
                 .into_iter()
-                .filter(
-                    |(
-                        (suitability_score, _queue_family_indices, _swapchain_details),
-                        _physical_device,
-                    )| { *suitability_score > 0 },
-                )
+                .filter(|(suitability, _physical_device)| suitability.score > 0)
                 // Find the one device with the best score.
                 //
                 // If there are multiple devices with the largest score, the first is chosen
                 .fold(
                     // Default empty device
-                    (
-                        (
-                            0i32,
-                            QueueFamilyIndices::default(),
-                            SwapchainSupportDetails::default(),
-                        ),
-                        None,
-                    ),
-                    // TODO: Difficult to understand, should organize the fold function
+                    (DeviceSuitabilityResult::default(), None),
                     |acc, device| {
-                        let (
-                            (
-                                acc_device_suitability_score,
-                                acc_queue_family_indices,
-                                acc_swapchain_details,
-                            ),
-                            acc_physical_device,
-                        ) = acc;
+                        let (acc_suitability, acc_physical_device) = acc;
+                        let (suitability, physical_device) = device;
 
-                        let (
-                            (device_suitability_score, queue_family_indices, swapchain_details),
-                            physical_device,
-                        ) = device;
-
-                        if device_suitability_score > acc_device_suitability_score {
-                            (
-                                (
-                                    device_suitability_score,
-                                    queue_family_indices,
-                                    swapchain_details,
-                                ),
-                                Some(physical_device),
-                            )
+                        if suitability.score > acc_suitability.score {
+                            (suitability, Some(physical_device))
                         } else {
-                            (
-                                (
-                                    acc_device_suitability_score,
-                                    acc_queue_family_indices,
-                                    acc_swapchain_details,
-                                ),
-                                acc_physical_device,
-                            )
+                            (acc_suitability, acc_physical_device)
                         }
                     },
                 );
-            if let Some(physical_device) = device.1 {
-                let queue_family_indices = device.0.1;
-                let swapchain_details = device.0.2;
+
+            let (suitability, physical_device) = device;
+            if let Some(physical_device) = physical_device {
                 let queue_priority = 1.0f32;
 
                 let queue_create_infos = [
                     vk::DeviceQueueCreateInfo {
                         s_type: vk::DeviceQueueCreateInfo::STRUCTURE_TYPE,
-                        queue_family_index: queue_family_indices.graphics.ok_or_else(|| {
-                            VulkanRendererError::MissingQueue("GRAPHICS".to_string())
-                        })?,
+                        queue_family_index: suitability.queue_family_indices.graphics.ok_or_else(
+                            || VulkanRendererError::MissingQueue("GRAPHICS".to_string()),
+                        )?,
                         queue_count: 1,
                         p_queue_priorities: &queue_priority as *const f32,
                         ..Default::default()
                     },
                     vk::DeviceQueueCreateInfo {
                         s_type: vk::DeviceQueueCreateInfo::STRUCTURE_TYPE,
-                        queue_family_index: queue_family_indices.present.ok_or_else(|| {
-                            VulkanRendererError::MissingQueue("PRESENT".to_string())
-                        })?,
+                        queue_family_index: suitability.queue_family_indices.present.ok_or_else(
+                            || VulkanRendererError::MissingQueue("PRESENT".to_string()),
+                        )?,
                         queue_count: 1,
                         p_queue_priorities: &queue_priority as *const f32,
                         ..Default::default()
@@ -792,15 +748,18 @@ impl VulkanRenderer {
                 let device = instance.create_device(physical_device, &create_info, None)?;
 
                 let device_queues = DeviceQueues {
-                    graphics: queue_family_indices
+                    graphics: suitability
+                        .queue_family_indices
                         .graphics
                         .map(|idx| device.get_device_queue(idx, 0)),
-                    present: queue_family_indices
+                    present: suitability
+                        .queue_family_indices
                         .present
                         .map(|idx| device.get_device_queue(idx, 0)),
                 };
 
-                let command_pools = Self::create_command_pools(&device, &queue_family_indices)?;
+                let command_pools =
+                    Self::create_command_pools(&device, &suitability.queue_family_indices)?;
                 let mut command_buffers = HashMap::default();
 
                 let command_buffer_alloc_info = vk::CommandBufferAllocateInfo {
@@ -830,11 +789,11 @@ impl VulkanRenderer {
                 Ok(CreateDeviceResult {
                     physical_device,
                     device,
-                    queue_family_indices,
+                    queue_family_indices: suitability.queue_family_indices,
                     device_queues,
                     command_pools,
                     command_buffers,
-                    swapchain_details,
+                    swapchain_details: suitability.swapchain_details,
                 })
             } else {
                 Err(VulkanRendererError::NoSupportedDevices)
