@@ -4,7 +4,7 @@ use engine131::{
     math131::{Vec2f32, Vec2u32, Vec3f32},
     renderer131::{
         BufferBinding, BufferCreateInfo, BufferFieldFormat, BufferHandle, BufferUsage,
-        ComponentBitCount, DrawCall, ProgramHandle, Renderer, RendererError, ScalarKind,
+        ComponentBitCount, DrawCall, DrawMode, ProgramHandle, Renderer, RendererError, ScalarKind,
         ShaderCreateInfo, ShaderHandle, ShaderStage,
     },
     systems::{System, SystemContext, SystemId},
@@ -32,6 +32,7 @@ pub(crate) struct Editor {
     frag: ShaderHandle,
     prog: ProgramHandle,
     vertices: BufferHandle,
+    indices: BufferHandle,
 }
 unsafe impl Send for Editor {}
 unsafe impl Sync for Editor {}
@@ -62,6 +63,7 @@ impl Editor {
             frag: ShaderHandle::null(),
             prog: ProgramHandle::null(),
             vertices: BufferHandle::null(),
+            indices: BufferHandle::null(),
         })
     }
 }
@@ -105,9 +107,10 @@ impl System for Editor {
         self.prog = default_prog;
 
         let vertices = [
-            ((0.0, -0.5), (1.0, 1.0, 1.0)),
-            ((0.5, 0.5), (0.0, 1.0, 0.0)),
-            ((-0.5, 0.5), (0.0, 0.0, 1.0)),
+            ((-0.5, -0.5), (1.0, 0.0, 0.0)),
+            ((0.5, -0.5), (0.0, 1.0, 0.0)),
+            ((0.5, 0.5), (0.0, 0.0, 1.0)),
+            ((-0.5, 0.5), (1.0, 1.0, 1.0)),
         ]
         .map(|(v, c)| Vertex {
             pos: Vec2f32::new(v.0, v.1),
@@ -125,7 +128,7 @@ impl System for Editor {
                         bits_per_component: ComponentBitCount::Two { a: 32, b: 32 },
                     },
                 )
-                .with_field::<Vec2f32>(
+                .with_field::<Vec3f32>(
                     BufferBinding::Location(1),
                     offset_of!(Vertex, col),
                     BufferFieldFormat {
@@ -141,6 +144,14 @@ impl System for Editor {
         )?;
 
         self.vertices = handle;
+
+        let indices = [0u32, 1, 2, 2, 3, 0];
+
+        let handle = self
+            .renderer
+            .create_buffer(BufferCreateInfo::new::<u32>(BufferUsage::Index, &indices))?;
+
+        self.indices = handle;
 
         Ok(())
     }
@@ -164,7 +175,8 @@ impl System for Editor {
 
         self.renderer.execute(DrawCall::Draw {
             program: self.prog,
-            vertex_buffers: vec![self.vertices],
+            buffers: vec![self.vertices, self.indices],
+            mode: DrawMode::Indexed,
         })?;
 
         Ok(())

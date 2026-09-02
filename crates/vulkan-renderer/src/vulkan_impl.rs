@@ -2,10 +2,11 @@ use crate::{
     FlowControl, MAX_FRAMES_IN_FLIGHT, VulkanBufferData, VulkanPipelineData, VulkanRenderer,
     VulkanRendererError, VulkanShaderData,
 };
-use ash::vk::{self, TaggedStructure};
+use ash::vk::{self, Handle, TaggedStructure};
 use renderer131::{
-    BufferCreateInfo, BufferFieldFormat, BufferHandle, BufferUsage, ComponentBitCount, DrawCall,
-    ProgramHandle, ScalarKind, Settings, ShaderCreateInfo, ShaderHandle,
+    BufferBinding, BufferCreateInfo, BufferFieldFormat, BufferHandle, BufferUsage,
+    ComponentBitCount, DrawCall, DrawMode, ProgramHandle, ScalarKind, Settings, ShaderCreateInfo,
+    ShaderHandle,
 };
 use std::{
     ffi::CString,
@@ -563,12 +564,14 @@ impl VulkanRenderer {
                     let format = Self::find_vulkan_format(field.format)?;
 
                     let location = match buffer_binding {
-                        renderer131::BufferBinding::Name(name) => {
+                        BufferBinding::Name(name) => {
                             todo!(
                                 "Cannot bind buffer {name}. Vulkan cannot search buffers by name."
                             )
                         }
-                        renderer131::BufferBinding::Location(loc) => *loc,
+                        BufferBinding::Location(loc) => *loc,
+                        // We don't care about binding location, so we just use an absurd location
+                        BufferBinding::IndexBufferBinding => u32::MAX as usize,
                     };
 
                     Ok(vk::VertexInputAttributeDescription {
@@ -635,6 +638,7 @@ impl VulkanRenderer {
                 size: std::mem::size_of_val(data.data) as u64,
                 usage: match data.usage {
                     BufferUsage::Vertex => vk::BufferUsageFlags::VERTEX_BUFFER,
+                    BufferUsage::Index => vk::BufferUsageFlags::INDEX_BUFFER,
                 } | vk::BufferUsageFlags::TRANSFER_DST,
                 sharing_mode: vk::SharingMode::EXCLUSIVE,
                 ..Default::default()
@@ -734,6 +738,7 @@ impl VulkanRenderer {
                 attribute_descriptions,
                 buffer,
                 device_memory,
+                index_elements: data.item_count,
             });
 
             Ok(buffer_handle)
@@ -757,11 +762,13 @@ impl VulkanRenderer {
         Ok(())
     }
 
-    unsafe fn record_command_buffer(
+    unsafe fn record_draw_command_buffer(
         &self,
         pipeline: &VulkanPipelineData,
         command_buffer: vk::CommandBuffer,
         image_index: usize,
+        buffers: &[BufferHandle],
+        draw_mode: DrawMode,
     ) -> Result<vk::CommandBuffer, VulkanRendererError> {
         unsafe {
             self.device.reset_command_buffer(
@@ -830,17 +837,73 @@ impl VulkanRenderer {
             };
             self.device.cmd_set_scissor(command_buffer, 0, &[scissor]);
 
-            let buffers = self
-                .buffers
+            let mut vertex_buffers = vec![];
+            let mut index_buffer = vk::Buffer::null();
+            let mut index_buffer_len = 0;
+            for buf in buffers
                 .iter()
-                .map(|(_, buffer)| buffer.buffer)
-                .collect::<Vec<_>>();
-            let offsets = vec![0u64; buffers.len()];
-            self.device
-                .cmd_bind_vertex_buffers(command_buffer, 0, &buffers, &offsets);
+                .map(|buf| {
+                    self.buffers
+                        .get(*buf)
+                        .ok_or_else(|| VulkanRendererError::NonexistantBuffer(*buf))
+                })
+                .collect::<Result<Vec<_>, VulkanRendererError>>()?
+            {
+                match buf.usage {
+                    BufferUsage::Vertex => vertex_buffers.push(buf.buffer),
+                    BufferUsage::Index => {
+                        if !index_buffer.is_null() {
+                            return Err(VulkanRendererError::TooManyIndexBuffers);
+                        }
+                        index_buffer = buf.buffer;
+                        index_buffer_len = buf.index_elements as u32;
+                    }
+                }
+            }
 
-            self.device.cmd_draw(command_buffer, 3, 1, 0, 0);
-            // TODO: Draw commands
+            let offsets = vec![0u64; vertex_buffers.len()];
+            match draw_mode {
+                DrawMode::Raw { vertex_count } => {
+                    if !index_buffer.is_null() {
+                        return Err(VulkanRendererError::IndexBufferNotAllowedInRawMode);
+                    }
+
+                    if !vertex_buffers.is_empty() {
+                        self.device.cmd_bind_vertex_buffers(
+                            command_buffer,
+                            0,
+                            &vertex_buffers,
+                            &offsets,
+                        );
+                    }
+                    self.device
+                        .cmd_draw(command_buffer, vertex_count as u32, 1, 0, 0);
+                }
+                DrawMode::Indexed => {
+                    if index_buffer.is_null() {
+                        return Err(VulkanRendererError::NoIndexBuffer);
+                    }
+
+                    if !vertex_buffers.is_empty() {
+                        self.device.cmd_bind_vertex_buffers(
+                            command_buffer,
+                            0,
+                            &vertex_buffers,
+                            &offsets,
+                        );
+                    }
+                    self.device.cmd_bind_index_buffer(
+                        command_buffer,
+                        index_buffer,
+                        0,
+                        vk::IndexType::UINT32,
+                    );
+                    // self.device
+                    //     .cmd_draw(command_buffer, index_buffer_len, 1, 0, 0);
+                    self.device
+                        .cmd_draw_indexed(command_buffer, index_buffer_len, 1, 0, 0, 0);
+                }
+            }
 
             self.device.cmd_end_render_pass(command_buffer);
             self.device.end_command_buffer(command_buffer)?;
@@ -852,7 +915,8 @@ impl VulkanRenderer {
     pub(crate) unsafe fn execute_draw_impl(
         &mut self,
         program: ProgramHandle,
-        vertex_buffers: &[BufferHandle],
+        buffers: &[BufferHandle],
+        draw_mode: DrawMode,
     ) -> Result<(), VulkanRendererError> {
         // TODO: Should find a better way to recreate swapchain that doesn't force the user into
         // specific code flow
@@ -922,15 +986,20 @@ impl VulkanRenderer {
 
             self.device.reset_fences(&[in_flight_fence])?;
 
-            let pipeline = self.get_or_create_pipeline(program, vertex_buffers)?;
+            let pipeline = self.get_or_create_pipeline(program, buffers)?;
             let pipeline = self.pipelines.get(&pipeline).ok_or_else(|| {
                 VulkanRendererError::VulkanError(format!(
                     "Pipeline doesn't exist for program {program:?}"
                 ))
             })?;
 
-            let command_buffer =
-                self.record_command_buffer(pipeline, command_buffer, image_index as usize)?;
+            let command_buffer = self.record_draw_command_buffer(
+                pipeline,
+                command_buffer,
+                image_index as usize,
+                buffers,
+                draw_mode,
+            )?;
 
             let wait_semaphores = [image_available_semaphore];
             let signal_semaphores = [render_finished_semaphore];
@@ -994,9 +1063,10 @@ impl VulkanRenderer {
         match draw_call {
             DrawCall::Draw {
                 program,
-                vertex_buffers,
+                buffers,
+                mode,
             } => {
-                unsafe { self.execute_draw_impl(program, &vertex_buffers)? };
+                unsafe { self.execute_draw_impl(program, &buffers, mode)? };
             }
         }
 

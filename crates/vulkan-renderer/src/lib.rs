@@ -63,6 +63,15 @@ pub enum VulkanRendererError {
     #[error("Buffer handle {0:?} doesn't exist")]
     NonexistantBuffer(BufferHandle),
 
+    #[error("Raw draw mode was used, but found an index buffer")]
+    IndexBufferNotAllowedInRawMode,
+
+    #[error("Draw calls only allow one index buffer")]
+    TooManyIndexBuffers,
+
+    #[error("Indexed draw mode used, but no index buffer was supplied")]
+    NoIndexBuffer,
+
     #[error("Could not find a supported memory layout for buffer")]
     NoSupportedMemoryLayouts,
 
@@ -173,12 +182,14 @@ struct VulkanShaderData {
     )]
     name: CString,
 }
+#[derive(Clone)]
 struct VulkanBufferData {
     usage: BufferUsage,
     binding_description: vk::VertexInputBindingDescription,
     attribute_descriptions: Vec<vk::VertexInputAttributeDescription>,
     buffer: vk::Buffer,
     device_memory: vk::DeviceMemory,
+    index_elements: usize,
 }
 struct VulkanPipelineData {
     pipeline: vk::Pipeline,
@@ -290,6 +301,7 @@ impl Renderer for VulkanRenderer {
     }
 
     fn create_buffer(&mut self, data: BufferCreateInfo) -> Result<BufferHandle, RendererError> {
+        data.validate()?;
         unsafe { Ok(self.create_buffer_impl(data)?) }
     }
     fn destroy_buffer(&mut self, vertex_buffer: BufferHandle) -> Result<(), RendererError> {
