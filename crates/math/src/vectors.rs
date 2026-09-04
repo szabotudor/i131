@@ -1,6 +1,7 @@
 use std::{
     array::IntoIter,
     fmt::Debug,
+    mem::MaybeUninit,
     ops::{Deref, DerefMut, Index, IndexMut},
     slice::{Iter, IterMut},
 };
@@ -10,6 +11,7 @@ use std::{
 //===============
 
 #[repr(C)]
+#[derive(PartialEq)]
 pub struct Vector<T, const SIZE: usize> {
     pub(crate) data: [T; SIZE],
 }
@@ -133,6 +135,81 @@ impl<T, const SIZE: usize> Index<usize> for Vector<T, SIZE> {
 impl<T, const SIZE: usize> IndexMut<usize> for Vector<T, SIZE> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         &mut self.data[index]
+    }
+}
+
+impl<T, const SIZE: usize> From<[T; SIZE]> for Vector<T, SIZE> {
+    fn from(value: [T; SIZE]) -> Self {
+        Self { data: value }
+    }
+}
+
+impl<T: Debug, const SIZE: usize> Vector<T, SIZE> {
+    pub fn from_vector<U>(vaule: Vector<U, SIZE>) -> Self
+    where
+        T: From<U>,
+    {
+        Self::from(vaule.data.map(T::from))
+    }
+    pub fn try_from_vector<U: Copy>(
+        value: Vector<U, SIZE>,
+    ) -> Result<Self, <T as TryFrom<U>>::Error>
+    where
+        T: From<U>,
+    {
+        unsafe {
+            let mut res = MaybeUninit::<[T; SIZE]>::uninit();
+            let res_ptr = res.as_mut_ptr() as *mut T;
+
+            for (i, result) in value.into_iter().map(T::try_from).enumerate() {
+                match result {
+                    Ok(v) => res_ptr.add(i).write(v),
+
+                    Err(err) => {
+                        for j in 0..i {
+                            res_ptr.add(j).drop_in_place();
+                        }
+                        return Err(err);
+                    }
+                }
+            }
+
+            Ok(Self {
+                data: res.assume_init(),
+            })
+        }
+    }
+
+    pub fn into_vector<U>(self) -> Vector<U, SIZE>
+    where
+        U: From<T>,
+    {
+        Vector::<U, SIZE>::from(self.data.map(U::from))
+    }
+    pub fn try_into_vector<U>(self) -> Result<Vector<U, SIZE>, <U as TryFrom<T>>::Error>
+    where
+        U: TryFrom<T>,
+    {
+        unsafe {
+            let mut res = MaybeUninit::<[U; SIZE]>::uninit();
+            let res_ptr = res.as_mut_ptr() as *mut U;
+
+            for (i, result) in self.into_iter().map(U::try_from).enumerate() {
+                match result {
+                    Ok(v) => res_ptr.add(i).write(v),
+                    Err(err) => {
+                        for j in 0..i {
+                            res_ptr.add(j).drop_in_place();
+                        }
+                        return Err(err);
+                    }
+                }
+            }
+
+            Ok(Vector::<U, SIZE> {
+                data: res.assume_init(),
+            })
+        }
     }
 }
 
