@@ -14,7 +14,7 @@ use raw_window_handle::{WaylandDisplayHandle, WaylandWindowHandle};
 #[cfg(target_os = "windows")]
 use raw_window_handle::{Win32WindowHandle, WindowsDisplayHandle};
 #[cfg(feature = "GLFW")]
-use std::{cell::RefCell, rc::Rc};
+use renderer131::Viewport;
 use std::{
     collections::HashMap,
     ffi::{CStr, CString, c_void},
@@ -849,7 +849,7 @@ impl VulkanRenderer {
         }
     }
 
-    unsafe fn create_swapchain(
+    unsafe fn create_vulkan_swapchain(
         args: CreateSwapchainArgs,
     ) -> Result<(vk::SwapchainKHR, Vec<vk::Image>), VulkanRendererError> {
         unsafe {
@@ -1012,31 +1012,30 @@ impl VulkanRenderer {
             .collect::<Result<Vec<_>, VulkanRendererError>>()
     }
 
-    #[cfg(feature = "GLFW")]
-    unsafe fn create_swapchain_glfw(
+    unsafe fn create_swapchain(
         &self,
-        window: &WindowDataGLFW,
+        viewport: &Viewport,
     ) -> Result<SwapchainData, VulkanRendererError> {
         unsafe {
-            let window_extent = window.window.get_framebuffer_size();
             let window_extent = vk::Extent2D {
-                width: window_extent.0 as u32,
-                height: window_extent.1 as u32,
+                width: viewport.size.x,
+                height: viewport.size.y,
             };
 
             let extent =
                 Self::choose_swap_extent(&self.swapchain_details.capabilities, window_extent)?;
 
-            let (swapchain, swapchain_images) = Self::create_swapchain(CreateSwapchainArgs {
-                instance_extensions: &self.instance_extensions,
-                device: self.device.handle(),
-                swapchain_details: &self.swapchain_details,
-                queue_family_indices: &self.queue_family_indices,
-                surface: self.surface,
-                format: self.swapchain_details.format,
-                present_mode: self.swapchain_details.present_mode,
-                extent,
-            })?;
+            let (swapchain, swapchain_images) =
+                Self::create_vulkan_swapchain(CreateSwapchainArgs {
+                    instance_extensions: &self.instance_extensions,
+                    device: self.device.handle(),
+                    swapchain_details: &self.swapchain_details,
+                    queue_family_indices: &self.queue_family_indices,
+                    surface: self.surface,
+                    format: self.swapchain_details.format,
+                    present_mode: self.swapchain_details.present_mode,
+                    extent,
+                })?;
 
             let swapchain_image_views = self.create_swapchain_image_views(&swapchain_images)?;
             let framebuffers =
@@ -1152,34 +1151,16 @@ impl VulkanRenderer {
     pub fn new_glfw_impl(
         name: &str,
         app_version: (u32, u32, u32),
-        window: Rc<RefCell<Window>>,
+        window: &Window,
         enable_validation: ValidationLevel,
     ) -> Result<Self, VulkanRendererError> {
         unsafe {
             use std::collections::{HashMap, VecDeque};
 
+            use math131::Vec2u32;
             use renderer131::{HandleMap, Settings};
 
-            let mut raw_window = window.borrow_mut();
-            let glfw = raw_window.get_glfw_data_mut();
-
-            let framebuffer_resized = Rc::new(RefCell::new(None));
-
-            let framebuffer_resized_clone = framebuffer_resized.clone();
-            glfw.window.set_framebuffer_size_callback(
-                move |#[expect(
-                    unused_variables,
-                    reason = "We don't need to do anything with window"
-                )]
-                      window,
-                      width,
-                      height| {
-                    use math131::Vec2i32;
-
-                    let mut framebuffer_resized = framebuffer_resized_clone.borrow_mut();
-                    *framebuffer_resized = Some(Vec2i32::new(width, height));
-                },
-            );
+            let glfw = window.get_glfw_data();
 
             let required_extensions = glfw
                 .glfw
@@ -1216,16 +1197,6 @@ impl VulkanRenderer {
 
             let render_pass = Self::create_render_pass(&device, swapchain_details.format)?;
 
-            let create_swapchain_fn = Box::new(
-                |renderer: &VulkanRenderer,
-                 window: &WindowDataGLFW|
-                 -> Result<SwapchainData, VulkanRendererError> {
-                    let swapchain_data = renderer.create_swapchain_glfw(window)?;
-
-                    Ok(swapchain_data)
-                },
-            );
-
             let flow_control = Self::create_flow_control(
                 &device,
                 &command_buffers
@@ -1236,11 +1207,8 @@ impl VulkanRenderer {
                     }),
             )?;
 
-            drop(raw_window);
-
             let mut renderer = Self {
-                window,
-                framebuffer_resized,
+                framebuffer_resized: None,
 
                 destroyed: false,
                 _entry: entry,
@@ -1254,7 +1222,6 @@ impl VulkanRenderer {
                 command_buffers,
                 swapchain_details,
                 swapchain: SwapchainData::default(),
-                create_swapchain_fn,
                 surface,
                 debug_messenger,
 
@@ -1272,6 +1239,9 @@ impl VulkanRenderer {
                 freed_buffer_bindings: VecDeque::default(),
             };
 
+            let framebuffer_size = glfw.window.get_framebuffer_size();
+            renderer.settings.viewport.size =
+                Vec2u32::new(framebuffer_size.0 as u32, framebuffer_size.1 as u32);
             renderer.recreate_swapchain()?;
 
             Ok(renderer)
@@ -1309,9 +1279,7 @@ impl VulkanRenderer {
 
             self.destroy_swapchain()?;
 
-            let window = self.window.borrow();
-
-            let swapchain_data = (self.create_swapchain_fn)(self, window.get_glfw_data())?;
+            let swapchain_data = self.create_swapchain(&self.settings.viewport)?;
             self.swapchain = swapchain_data;
 
             Ok(())

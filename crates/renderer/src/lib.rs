@@ -1,4 +1,4 @@
-use math131::Vec4f32;
+use math131::{Vec2u32, Vec4f32};
 use serde::{Deserialize, Serialize};
 use std::{
     any::TypeId,
@@ -238,9 +238,16 @@ impl HandleName for ProgramHandleMarker {
 }
 pub type ProgramHandle = Handle<ProgramHandleMarker>;
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone, Debug, PartialEq)]
+pub struct Viewport {
+    pub origin: Vec2u32,
+    pub size: Vec2u32,
+}
+#[derive(Default, Clone, Debug, PartialEq)]
 pub struct Settings {
     pub clear_color: Vec4f32,
+    /// Also used for raw framebuffer size when needed
+    pub viewport: Viewport,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -414,4 +421,9 @@ where
     fn destroy_buffer(&mut self, vertex_buffer: BufferHandle) -> Result<(), RendererError>;
 
     fn execute(&mut self, draw_call: DrawCall) -> Result<(), RendererError>;
+
+    fn change_settings(
+        &mut self,
+        callback: Box<dyn FnMut(&mut Settings)>,
+    ) -> Result<(), RendererError>;
 }

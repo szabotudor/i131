@@ -5,7 +5,7 @@ use engine131::{
     renderer131::{
         BufferBinding, BufferCreateInfo, BufferFieldFormat, BufferHandle, BufferUsage,
         ComponentBitCount, DrawCall, DrawMode, ProgramHandle, Renderer, RendererError, ScalarKind,
-        ShaderCreateInfo, ShaderHandle, ShaderStage,
+        ShaderCreateInfo, ShaderHandle, ShaderStage, Viewport,
     },
     systems::{System, SystemContext, SystemId},
     window131::{Window, WindowError, WindowMode, WindowSettings},
@@ -26,8 +26,9 @@ pub enum EditorError {
 
 pub(crate) struct Editor {
     context: SystemContext,
+    viewport_resize: Rc<RefCell<Option<Vec2u32>>>,
     renderer: Box<dyn Renderer>,
-    window: Rc<RefCell<Window>>,
+    window: Window,
     vert: ShaderHandle,
     frag: ShaderHandle,
     prog: ProgramHandle,
@@ -39,24 +40,32 @@ unsafe impl Sync for Editor {}
 
 impl Editor {
     pub fn new() -> Result<Self, EditorError> {
-        let window = Rc::new(RefCell::new(Window::new(
+        let mut window = Window::new(
             WindowSettings::new()
                 .with_title("I131".to_string())
                 .with_size(Vec2u32::new(800, 600))
                 .with_mode(WindowMode::Windowed),
-        )?));
+        )?;
         // TODO: Implement system init arguments
         //
         // Needed to enable/disable validation here
         let renderer = VulkanRenderer::new_glfw(
             "I131_VulkanBackend",
             (1, 3, 0),
-            window.clone(),
+            &window,
             ValidationLevel::Normal,
         )?;
 
+        let viewport_resize = Rc::new(RefCell::new(None));
+        let viewport_resize_clone = viewport_resize.clone();
+        window.set_resize_callback(move |_window, new_size| {
+            let mut viewport = viewport_resize_clone.borrow_mut();
+            *viewport = Some(new_size);
+        });
+
         Ok(Self {
             context: SystemContext::empty(),
+            viewport_resize,
             window,
             renderer: Box::new(renderer),
             vert: ShaderHandle::null(),
@@ -163,15 +172,24 @@ impl System for Editor {
     fn update(&mut self, delta: f32) -> Result<(), engine131::systems::SystemError> {
         let _ = delta;
         let engine = self.context.engine()?;
-        let mut window = self.window.borrow_mut();
 
-        window.update();
+        self.window.update();
 
-        if window.should_close() {
+        if self.window.should_close() {
             engine.request_immediate_shutdown()?;
         }
 
-        drop(window);
+        let mut viewport_resize = self.viewport_resize.borrow_mut();
+        if let Some(viewport) = *viewport_resize {
+            *viewport_resize = None;
+
+            self.renderer.change_settings(Box::new(move |settings| {
+                settings.viewport = Viewport {
+                    origin: Vec2u32::default(),
+                    size: viewport,
+                };
+            }))?;
+        }
 
         self.renderer.execute(DrawCall::Draw {
             program: self.prog,
@@ -185,15 +203,12 @@ impl System for Editor {
     fn in_editor_update(&mut self, delta: f32) -> Result<(), engine131::systems::SystemError> {
         let _ = delta;
         let engine = self.context.engine()?;
-        let mut window = self.window.borrow_mut();
 
-        window.update();
+        self.window.update();
 
-        if window.should_close() {
+        if self.window.should_close() {
             engine.request_immediate_shutdown()?;
         }
-
-        drop(window);
 
         Ok(())
     }

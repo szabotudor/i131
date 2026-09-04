@@ -53,10 +53,12 @@ impl WindowSettings {
     }
 }
 
+type ResizeCallbackBox = Box<dyn Fn(&Window, Vec2u32)>;
 pub struct Window {
     #[cfg(feature = "GLFW")]
     data: WindowDataGLFW,
     should_close: bool,
+    resize_callback: Option<ResizeCallbackBox>,
 }
 
 #[cfg(feature = "GLFW")]

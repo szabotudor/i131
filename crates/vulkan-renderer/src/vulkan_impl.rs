@@ -55,7 +55,14 @@ macro_rules! vk_format_table {
 }
 
 impl VulkanRenderer {
-    fn settings_hash(settings: &Settings) -> usize {
+    fn settings_hash(
+        #[expect(
+            unused_variables,
+            reason = "No setting used in fixed state, only variable state"
+        )]
+        settings: &Settings,
+    ) -> usize {
+        #[expect(unused_mut, reason = "Hasher will need to hash settings in the future")]
         let mut hasher = DefaultHasher::new();
         let hash = hasher.finish();
 
@@ -178,10 +185,10 @@ impl VulkanRenderer {
         };
 
         let viewport = vk::Viewport {
-            x: 0.0f32,
-            y: 0.0f32,
-            width: self.swapchain.extent.width as f32,
-            height: self.swapchain.extent.height as f32,
+            x: self.settings.viewport.origin.x as f32,
+            y: self.settings.viewport.origin.y as f32,
+            width: self.settings.viewport.size.x as f32,
+            height: self.settings.viewport.size.y as f32,
             min_depth: 0.0f32,
             max_depth: 1.0f32,
         };
@@ -432,28 +439,6 @@ impl VulkanRenderer {
 
         Ok(())
     }
-
-    // fn find_vulkan_format(format: BufferFieldFormat) -> Result<vk::Format, VulkanRendererError> {
-    //     match format {
-    //         BufferFieldFormat {
-    //             kind: ScalarKind::Float,
-    //             normalized: false,
-    //             bits_per_component: ComponentBitCount::Two { a: 32, b: 32 },
-    //         } => Ok(vk::Format::R32G32_SFLOAT),
-    //         BufferFieldFormat {
-    //             kind: ScalarKind::Float,
-    //             normalized: false,
-    //             bits_per_component:
-    //                 ComponentBitCount::Three {
-    //                     r: 32,
-    //                     g: 32,
-    //                     b: 32,
-    //                 },
-    //         } => Ok(vk::Format::R32G32B32_SFLOAT),
-    //
-    //         _ => Err(VulkanRendererError::UnsupportedVertexFormat(format)),
-    //     }
-    // }
 
     vk_format_table! {
         uniform {
@@ -822,12 +807,12 @@ impl VulkanRenderer {
             );
 
             let viewport = vk::Viewport {
-                x: 0.0f32,
-                y: 0.0f32,
-                width: self.swapchain.extent.width as f32,
-                height: self.swapchain.extent.height as f32,
+                x: self.settings.viewport.origin.x as f32,
+                y: self.settings.viewport.origin.y as f32,
+                width: self.settings.viewport.size.x as f32,
+                height: self.settings.viewport.size.y as f32,
                 min_depth: 0.0f32,
-                max_depth: 0.0f32,
+                max_depth: 1.0f32,
             };
             self.device.cmd_set_viewport(command_buffer, 0, &[viewport]);
 
@@ -918,12 +903,6 @@ impl VulkanRenderer {
         buffers: &[BufferHandle],
         draw_mode: DrawMode,
     ) -> Result<(), VulkanRendererError> {
-        // TODO: Should find a better way to recreate swapchain that doesn't force the user into
-        // specific code flow
-        self.window
-            .try_borrow()
-            .map_err(|_| VulkanRendererError::WindowAlreadyBorrowedError)?;
-
         unsafe {
             let command_buffers = self
                 .command_buffers
@@ -953,15 +932,14 @@ impl VulkanRenderer {
             self.device
                 .wait_for_fences(&[in_flight_fence], true, u64::MAX)?;
 
-            let framebuffer_new_size = *self.framebuffer_resized.borrow();
-            if let Some(new_size) = framebuffer_new_size {
+            if let Some(new_size) = self.framebuffer_resized {
                 self.recreate_swapchain()?;
 
                 if new_size.x == 0 || new_size.y == 0 {
                     return Ok(());
                 }
 
-                *self.framebuffer_resized.borrow_mut() = None;
+                self.framebuffer_resized = None;
             }
 
             let mut image_index = 0u32;

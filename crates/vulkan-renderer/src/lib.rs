@@ -10,8 +10,6 @@ use renderer131::{
     ProgramHandle, Renderer, RendererInstanceError, Settings, ShaderCreateInfo, ShaderHandle,
     ShaderStage,
 };
-#[cfg(feature = "GLFW")]
-use std::{cell::RefCell, rc::Rc};
 use std::{
     collections::{HashMap, VecDeque},
     ffi::{CString, NulError, c_void},
@@ -19,7 +17,7 @@ use std::{
 };
 use thiserror::Error;
 #[cfg(feature = "GLFW")]
-use window131::{Window, WindowDataGLFW};
+use window131::Window;
 
 pub mod build_tools;
 mod vulkan_impl;
@@ -170,9 +168,6 @@ struct SwapchainData {
     framebuffers: Vec<vk::Framebuffer>,
 }
 
-type CreateSwapchainFn =
-    Box<dyn Fn(&VulkanRenderer, &WindowDataGLFW) -> Result<SwapchainData, VulkanRendererError>>;
-
 struct VulkanShaderData {
     shader_module: vk::ShaderModule,
     stage: ShaderStage,
@@ -205,8 +200,7 @@ struct FlowControl {
 }
 
 pub struct VulkanRenderer {
-    window: Rc<RefCell<Window>>,
-    framebuffer_resized: Rc<RefCell<Option<Vec2i32>>>,
+    framebuffer_resized: Option<Vec2i32>,
 
     destroyed: bool,
     _entry: Entry,
@@ -220,7 +214,6 @@ pub struct VulkanRenderer {
     command_buffers: HashMap<vk::CommandPool, Vec<vk::CommandBuffer>>,
     swapchain_details: SwapchainSupportDetails,
     swapchain: SwapchainData,
-    create_swapchain_fn: CreateSwapchainFn,
     surface: vk::SurfaceKHR,
     debug_messenger: Option<DebugMessengerData>,
 
@@ -249,7 +242,7 @@ impl VulkanRenderer {
     pub fn new_glfw(
         name: &str,
         app_version: (u32, u32, u32),
-        window: Rc<RefCell<Window>>,
+        window: &Window,
         enable_validation: ValidationLevel,
     ) -> Result<Self, RendererError> {
         Ok(Self::new_glfw_impl(
@@ -310,5 +303,28 @@ impl Renderer for VulkanRenderer {
 
     fn execute(&mut self, draw_call: DrawCall) -> Result<(), RendererError> {
         unsafe { Ok(self.execute_impl(draw_call)?) }
+    }
+
+    fn change_settings(
+        &mut self,
+        mut callback: Box<dyn FnMut(&mut Settings)>,
+    ) -> Result<(), RendererError> {
+        let mut new_settings = self.settings.clone();
+
+        (callback)(&mut new_settings);
+
+        if new_settings.viewport != self.settings.viewport {
+            self.framebuffer_resized =
+                dbg!(Some(new_settings.viewport.size.try_into_vector().map_err(
+                    |err| {
+                        RendererError::from(VulkanRendererError::VulkanError(format!(
+                            "Could not convert viewport: {err}"
+                        )))
+                    },
+                )?));
+        }
+        self.settings = new_settings;
+
+        Ok(())
     }
 }
