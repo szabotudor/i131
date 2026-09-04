@@ -23,8 +23,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 #[cfg(feature = "GLFW")]
-use window131::Window;
-use window131::WindowDataGLFW;
+use window131::{Window, WindowGLFW};
 
 #[derive(Default)]
 pub(crate) struct SwapchainSupportDetails {
@@ -586,7 +585,7 @@ impl VulkanRenderer {
     unsafe fn create_surface_glfw(
         instance: &Instance,
         instance_extensions: &InstanceExtensions,
-        window: &WindowDataGLFW,
+        window: &WindowGLFW,
     ) -> Result<vk::SurfaceKHR, VulkanRendererError> {
         unsafe {
             use raw_window_handle::{
@@ -1175,16 +1174,18 @@ impl VulkanRenderer {
     pub fn new_glfw_impl(
         name: &str,
         app_version: (u32, u32, u32),
-        window: &Window,
+        window: &dyn Window,
         enable_validation: ValidationLevel,
     ) -> Result<Self, VulkanRendererError> {
         unsafe {
-            use std::collections::{HashMap, VecDeque};
-
             use math131::Vec2u32;
-            use renderer131::{HandleMap, Settings};
+            use renderer131::Settings;
+            use std::collections::{HashMap, VecDeque};
+            use utils131::HandleMap;
 
-            let glfw = window.get_glfw_data();
+            let glfw: &WindowGLFW = window
+                .downcast_ref()
+                .ok_or_else(|| VulkanRendererError::WindowUnavailableError)?;
 
             let required_extensions = glfw
                 .glfw

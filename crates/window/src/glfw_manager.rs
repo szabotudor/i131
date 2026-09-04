@@ -1,33 +1,31 @@
-use glfw::{ClientApiHint, Glfw, GlfwReceiver, PWindow, WindowEvent, WindowHint};
+use crate::{
+    CallbackBox, CallbackHandle, Window, WindowError, WindowEvent, WindowEventType, WindowSettings,
+};
+use glfw::{ClientApiHint, Glfw, GlfwReceiver, PWindow, WindowHint};
 use math131::Vec2u32;
+use std::collections::HashMap;
+use utils131::HandleMap;
 
-use crate::{Window, WindowError};
-
-pub struct WindowDataGLFW {
+pub struct WindowGLFW {
     pub glfw: Glfw,
     pub window: PWindow,
-    pub events: GlfwReceiver<(f64, WindowEvent)>,
-}
-unsafe impl Send for WindowDataGLFW {}
+    pub events: GlfwReceiver<(f64, glfw::WindowEvent)>,
 
-impl super::Window {
+    callbacks: HashMap<CallbackHandle, WindowEventType>,
+    callback_funcs: HashMap<WindowEventType, HandleMap<CallbackHandle, CallbackBox>>,
+    should_close: bool,
+}
+
+impl WindowGLFW {
     fn glfw_error_callback(error: glfw::Error, message: String) {
         println!("GLFW error:\n{error}\n  - {message}");
     }
 
-    pub fn get_glfw_data(&self) -> &WindowDataGLFW {
-        &self.data
-    }
-
-    pub fn get_glfw_data_mut(&mut self) -> &mut WindowDataGLFW {
-        &mut self.data
-    }
-
-    pub fn new(settings: super::WindowSettings) -> Result<Self, WindowError> {
+    pub fn new(settings: WindowSettings) -> Result<Self, WindowError> {
         let mut glfw = glfw::init(Self::glfw_error_callback)?;
 
         glfw.window_hint(WindowHint::ClientApi(ClientApiHint::NoApi));
-        let Some((window, events)) = glfw.create_window(
+        let Some((mut window, events)) = glfw.create_window(
             settings.size.x,
             settings.size.y,
             settings.title.as_str(),
@@ -38,54 +36,87 @@ impl super::Window {
             ));
         };
 
-        let data = WindowDataGLFW {
+        window.set_close_polling(true);
+        window.set_size_polling(true);
+        window.set_framebuffer_size_polling(true);
+
+        Ok(Self {
             glfw,
             window,
             events,
-        };
 
-        Ok(Self {
-            data,
+            callbacks: HashMap::default(),
+            callback_funcs: HashMap::default(),
             should_close: false,
-            resize_callback: None,
         })
     }
+}
 
-    pub fn should_close(&self) -> bool {
-        self.should_close || self.data.window.should_close()
+impl Window for WindowGLFW {
+    fn should_close(&self) -> bool {
+        self.should_close
     }
 
-    pub fn set_resize_callback<C: Fn(&Window, Vec2u32) + 'static>(&mut self, callback: C) {
-        self.resize_callback = Some(Box::new(callback));
+    fn create_callback_raw(
+        &mut self,
+        on_event: crate::WindowEventType,
+        callback: CallbackBox,
+    ) -> CallbackHandle {
+        let funcs = self.callback_funcs.entry(on_event).or_default();
+
+        let handle = funcs.insert(callback);
+        self.callbacks.insert(handle, on_event);
+
+        handle
     }
 
-    pub fn update(&mut self) {
-        self.data.glfw.poll_events();
+    fn remove_callback(&mut self, handle: CallbackHandle) {
+        if let Some(event_type) = self.callbacks.get(&handle) {
+            self.callback_funcs.entry(*event_type).and_modify(|funcs| {
+                funcs.remove(handle);
+            });
+        }
 
-        for (_e, event) in glfw::flush_messages(&self.data.events) {
+        self.callbacks.remove(&handle);
+    }
+
+    fn update(&mut self) {
+        self.glfw.poll_events();
+
+        for (_e, event) in glfw::flush_messages(&self.events) {
             match event {
-                WindowEvent::Refresh
-                | WindowEvent::Focus(_)
-                | WindowEvent::Iconify(_)
-                | WindowEvent::MouseButton(_, _, _)
-                | WindowEvent::CursorPos(_, _)
-                | WindowEvent::CursorEnter(_)
-                | WindowEvent::Scroll(_, _)
-                | WindowEvent::Key(_, _, _, _)
-                | WindowEvent::Char(_)
-                | WindowEvent::CharModifiers(_, _)
-                | WindowEvent::FileDrop(_)
-                | WindowEvent::Maximize(_)
-                | WindowEvent::ContentScale(_, _)
-                | WindowEvent::Pos(_, _) => {}
+                glfw::WindowEvent::Refresh
+                | glfw::WindowEvent::Focus(_)
+                | glfw::WindowEvent::Iconify(_)
+                | glfw::WindowEvent::MouseButton(_, _, _)
+                | glfw::WindowEvent::CursorPos(_, _)
+                | glfw::WindowEvent::CursorEnter(_)
+                | glfw::WindowEvent::Scroll(_, _)
+                | glfw::WindowEvent::Key(_, _, _, _)
+                | glfw::WindowEvent::Char(_)
+                | glfw::WindowEvent::CharModifiers(_, _)
+                | glfw::WindowEvent::FileDrop(_)
+                | glfw::WindowEvent::Maximize(_)
+                | glfw::WindowEvent::ContentScale(_, _)
+                | glfw::WindowEvent::Pos(_, _) => {}
 
-                WindowEvent::Size(_, _) => {}
-                WindowEvent::FramebufferSize(width, height) => {
-                    if let Some(resize_callback) = &self.resize_callback {
-                        (resize_callback)(self, dbg!(Vec2u32::new(width as u32, height as u32)));
+                glfw::WindowEvent::Size(_, _) => {}
+                glfw::WindowEvent::FramebufferSize(width, height) => {
+                    if let Some(callbacks) =
+                        self.callback_funcs.get(&WindowEventType::ResizeFramebuffer)
+                    {
+                        for (_, callback) in callbacks.iter() {
+                            (callback)(
+                                self,
+                                WindowEvent::ResizeFramebuffer(Vec2u32::new(
+                                    width as u32,
+                                    height as u32,
+                                )),
+                            );
+                        }
                     }
                 }
-                WindowEvent::Close => {
+                glfw::WindowEvent::Close => {
                     self.should_close = true;
                 }
             }

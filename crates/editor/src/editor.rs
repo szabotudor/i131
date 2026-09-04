@@ -8,7 +8,10 @@ use engine131::{
         ShaderCreateInfo, ShaderHandle, ShaderStage, Viewport,
     },
     systems::{System, SystemContext, SystemId},
-    window131::{Window, WindowError, WindowMode, WindowSettings},
+    window131::{
+        CallbackHandle, Window, WindowError, WindowEvent, WindowEventType, WindowGLFW, WindowMode,
+        WindowSettings,
+    },
 };
 use thiserror::Error;
 use vulkan_renderer::{ValidationLevel, VulkanRenderer};
@@ -26,9 +29,10 @@ pub enum EditorError {
 
 pub(crate) struct Editor {
     context: SystemContext,
+    viewport_callback: CallbackHandle,
     viewport_resize: Rc<RefCell<Option<Vec2u32>>>,
     renderer: Box<dyn Renderer>,
-    window: Window,
+    window: Box<dyn Window>,
     vert: ShaderHandle,
     frag: ShaderHandle,
     prog: ProgramHandle,
@@ -40,31 +44,29 @@ unsafe impl Sync for Editor {}
 
 impl Editor {
     pub fn new() -> Result<Self, EditorError> {
-        let mut window = Window::new(
+        let window = WindowGLFW::new(
             WindowSettings::new()
                 .with_title("I131".to_string())
                 .with_size(Vec2u32::new(800, 600))
                 .with_mode(WindowMode::Windowed),
         )?;
+        let window: Box<dyn Window> = Box::new(window);
+
         // TODO: Implement system init arguments
         //
         // Needed to enable/disable validation here
         let renderer = VulkanRenderer::new_glfw(
             "I131_VulkanBackend",
             (1, 3, 0),
-            &window,
+            window.as_ref(),
             ValidationLevel::Normal,
         )?;
 
         let viewport_resize = Rc::new(RefCell::new(None));
-        let viewport_resize_clone = viewport_resize.clone();
-        window.set_resize_callback(move |_window, new_size| {
-            let mut viewport = viewport_resize_clone.borrow_mut();
-            *viewport = Some(new_size);
-        });
 
         Ok(Self {
             context: SystemContext::empty(),
+            viewport_callback: CallbackHandle::null(),
             viewport_resize,
             window,
             renderer: Box::new(renderer),
@@ -94,6 +96,18 @@ impl System for Editor {
         context: SystemContext,
     ) -> Result<(), engine131::systems::SystemError> {
         self.context = context;
+
+        let viewport_resize_clone = self.viewport_resize.clone();
+        let viewport_callback = self.window.set_callback(
+            WindowEventType::ResizeFramebuffer,
+            move |_window, new_size| {
+                if let WindowEvent::ResizeFramebuffer(new_size) = new_size {
+                    let mut viewport = viewport_resize_clone.borrow_mut();
+                    *viewport = Some(new_size);
+                }
+            },
+        );
+        self.viewport_callback = viewport_callback;
 
         let default_vert = self.renderer.create_shader(ShaderCreateInfo {
             source: shaders_vulkan::DEFAULT_VERT,
@@ -218,6 +232,8 @@ impl System for Editor {
     }
 
     fn destroy(&mut self) -> Result<(), engine131::systems::SystemError> {
+        self.window.remove_callback(self.viewport_callback);
+
         self.renderer.destroy()?;
         self.vert = ShaderHandle::null();
         self.frag = ShaderHandle::null();

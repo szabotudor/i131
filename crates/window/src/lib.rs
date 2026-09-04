@@ -1,3 +1,9 @@
+use math131::Vec2u32;
+use std::any::Any;
+use strum::EnumDiscriminants;
+use thiserror::Error;
+use utils131::define_handle;
+
 #[derive(Debug, Error)]
 pub enum WindowError {
     #[error("{0}")]
@@ -53,17 +59,54 @@ impl WindowSettings {
     }
 }
 
-type ResizeCallbackBox = Box<dyn Fn(&Window, Vec2u32)>;
-pub struct Window {
-    #[cfg(feature = "GLFW")]
-    data: WindowDataGLFW,
-    should_close: bool,
-    resize_callback: Option<ResizeCallbackBox>,
+#[derive(EnumDiscriminants, Debug)]
+#[strum_discriminants(derive(Hash))]
+#[strum_discriminants(name(WindowEventType))]
+pub enum WindowEvent {
+    ResizeWindow(Vec2u32),
+    ResizeFramebuffer(Vec2u32),
+    Close,
+}
+
+type CallbackBox = Box<dyn Fn(&dyn Window, WindowEvent)>;
+define_handle! {Callback}
+
+pub trait Window
+where
+    Self: Any,
+{
+    fn should_close(&self) -> bool;
+
+    fn create_callback_raw(
+        &mut self,
+        on_event: WindowEventType,
+        callback: CallbackBox,
+    ) -> CallbackHandle;
+    fn remove_callback(&mut self, callback: CallbackHandle);
+
+    fn update(&mut self);
+}
+
+impl dyn Window {
+    pub fn downcast_ref<T: Window + 'static>(&self) -> Option<&T> {
+        (self as &dyn Any).downcast_ref()
+    }
+
+    pub fn downcast_mut<T: Window + 'static>(&mut self) -> Option<&mut T> {
+        (self as &mut dyn Any).downcast_mut()
+    }
+
+    pub fn set_callback<C: Fn(&dyn Window, WindowEvent) + 'static>(
+        &mut self,
+        on_event: WindowEventType,
+        callback: C,
+    ) -> CallbackHandle {
+        self.create_callback_raw(on_event, Box::new(callback))
+    }
 }
 
 #[cfg(feature = "GLFW")]
 pub mod glfw_manager;
+
 #[cfg(feature = "GLFW")]
 pub use glfw_manager::*;
-use math131::Vec2u32;
-use thiserror::Error;

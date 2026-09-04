@@ -6,9 +6,8 @@ use raw_window_handle::HandleError;
 #[cfg(feature = "GLFW")]
 use renderer131::RendererError;
 use renderer131::{
-    BufferCreateInfo, BufferFieldFormat, BufferHandle, BufferUsage, DrawCall, HandleMap,
-    ProgramHandle, Renderer, RendererInstanceError, Settings, ShaderCreateInfo, ShaderHandle,
-    ShaderStage,
+    BufferCreateInfo, BufferFieldFormat, BufferHandle, BufferUsage, DrawCall, ProgramHandle,
+    Renderer, RendererInstanceError, Settings, ShaderCreateInfo, ShaderHandle, ShaderStage,
 };
 use std::{
     collections::{HashMap, VecDeque},
@@ -16,6 +15,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 use thiserror::Error;
+use utils131::HandleMap;
 #[cfg(feature = "GLFW")]
 use window131::Window;
 
@@ -29,8 +29,8 @@ pub enum VulkanRendererError {
     #[error("Error getting GLFW instance")]
     GLFWInstanceError,
 
-    #[error("Window RefCell should not be borrowed when `execute` is invoked on a vulkan renderer")]
-    WindowAlreadyBorrowedError,
+    #[error("Window could not be downcast to right type or isn't available")]
+    WindowUnavailableError,
 
     #[cfg(feature = "GLFW")]
     #[error("Unknown GLFW error: {0}")]
@@ -242,7 +242,7 @@ impl VulkanRenderer {
     pub fn new_glfw(
         name: &str,
         app_version: (u32, u32, u32),
-        window: &Window,
+        window: &dyn Window,
         enable_validation: ValidationLevel,
     ) -> Result<Self, RendererError> {
         Ok(Self::new_glfw_impl(
@@ -314,14 +314,13 @@ impl Renderer for VulkanRenderer {
         (callback)(&mut new_settings);
 
         if new_settings.viewport != self.settings.viewport {
-            self.framebuffer_resized =
-                dbg!(Some(new_settings.viewport.size.try_into_vector().map_err(
-                    |err| {
-                        RendererError::from(VulkanRendererError::VulkanError(format!(
-                            "Could not convert viewport: {err}"
-                        )))
-                    },
-                )?));
+            self.framebuffer_resized = Some(new_settings.viewport.size.try_into_vector().map_err(
+                |err| {
+                    RendererError::from(VulkanRendererError::VulkanError(format!(
+                        "Could not convert viewport: {err}"
+                    )))
+                },
+            )?);
         }
         self.settings = new_settings;
 
