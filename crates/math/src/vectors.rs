@@ -16,6 +16,15 @@ pub struct Vector<T, const SIZE: usize> {
     pub(crate) data: [T; SIZE],
 }
 
+impl<T, const SIZE: usize> Vector<T, SIZE> {
+    pub fn as_slice(&self) -> &[T; SIZE] {
+        &self.data
+    }
+    pub fn as_slice_mut(&mut self) -> &mut [T; SIZE] {
+        &mut self.data
+    }
+}
+
 impl<T> Vector<T, 2> {
     pub fn new(x: T, y: T) -> Self {
         Self { data: [x, y] }
