@@ -710,8 +710,12 @@ impl VulkanRenderer {
             if let Some(physical_device) = physical_device {
                 let queue_priority = 1.0f32;
 
-                let queue_create_infos = [
-                    vk::DeviceQueueCreateInfo {
+                let queue_create_infos = if suitability
+                    .queue_family_indices
+                    .graphics
+                    .is_some_and(|idx| Some(idx) == suitability.queue_family_indices.present)
+                {
+                    [vk::DeviceQueueCreateInfo {
                         s_type: vk::DeviceQueueCreateInfo::STRUCTURE_TYPE,
                         queue_family_index: suitability.queue_family_indices.graphics.ok_or_else(
                             || VulkanRendererError::MissingQueue("GRAPHICS".to_string()),
@@ -719,17 +723,37 @@ impl VulkanRenderer {
                         queue_count: 1,
                         p_queue_priorities: &queue_priority as *const f32,
                         ..Default::default()
-                    },
-                    vk::DeviceQueueCreateInfo {
-                        s_type: vk::DeviceQueueCreateInfo::STRUCTURE_TYPE,
-                        queue_family_index: suitability.queue_family_indices.present.ok_or_else(
-                            || VulkanRendererError::MissingQueue("PRESENT".to_string()),
-                        )?,
-                        queue_count: 1,
-                        p_queue_priorities: &queue_priority as *const f32,
-                        ..Default::default()
-                    },
-                ];
+                    }]
+                    .to_vec()
+                } else {
+                    [
+                        vk::DeviceQueueCreateInfo {
+                            s_type: vk::DeviceQueueCreateInfo::STRUCTURE_TYPE,
+                            queue_family_index: suitability
+                                .queue_family_indices
+                                .graphics
+                                .ok_or_else(|| {
+                                    VulkanRendererError::MissingQueue("GRAPHICS".to_string())
+                                })?,
+                            queue_count: 1,
+                            p_queue_priorities: &queue_priority as *const f32,
+                            ..Default::default()
+                        },
+                        vk::DeviceQueueCreateInfo {
+                            s_type: vk::DeviceQueueCreateInfo::STRUCTURE_TYPE,
+                            queue_family_index: suitability
+                                .queue_family_indices
+                                .present
+                                .ok_or_else(|| {
+                                    VulkanRendererError::MissingQueue("PRESENT".to_string())
+                                })?,
+                            queue_count: 1,
+                            p_queue_priorities: &queue_priority as *const f32,
+                            ..Default::default()
+                        },
+                    ]
+                    .to_vec()
+                };
 
                 let required_extensions = Self::REQUIRED_DEVICE_EXTENSIONS
                     .map(|ext| ext.as_ptr())
