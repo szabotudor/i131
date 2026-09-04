@@ -773,12 +773,7 @@ impl VulkanRenderer {
             // TODO: Image index
             let clear_value = vk::ClearValue {
                 color: vk::ClearColorValue {
-                    float32: [
-                        self.settings.clear_color.x,
-                        self.settings.clear_color.y,
-                        self.settings.clear_color.z,
-                        self.settings.clear_color.w,
-                    ],
+                    float32: self.settings.clear_color.as_slice().clone(),
                 },
             };
             let render_pass_begin_info = vk::RenderPassBeginInfo {
