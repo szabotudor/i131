@@ -1,6 +1,8 @@
+use crate::{Matrix, ScalarOp, Vector};
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
 
-use crate::{ScalarOp, Vector};
+//
+// Vectors
 
 impl<T, const SIZE: usize> Add for Vector<T, SIZE>
 where
@@ -105,5 +107,56 @@ where
         for i in 0..SIZE {
             self[i] /= rhs[i];
         }
+    }
+}
+
+//
+// Matrices
+
+impl<T, const M: usize, const N: usize> Add for Matrix<T, M, N>
+where
+    Self: ScalarOp,
+    T: Add + Copy,
+    Vector<T, N>: Add<Output = Vector<T, N>>,
+{
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self {
+            rows: Vector::<Vector<T, N>, M>::from(std::array::from_fn(|i| {
+                self.rows[i] + rhs.rows[i]
+            })),
+        }
+    }
+}
+impl<T, const M: usize, const N: usize> Sub for Matrix<T, M, N>
+where
+    Self: ScalarOp,
+    T: Sub + Copy,
+    Vector<T, N>: Sub<Output = Vector<T, N>>,
+{
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        Self {
+            rows: Vector::<Vector<T, N>, M>::from(std::array::from_fn(|i| {
+                self.rows[i] - rhs.rows[i]
+            })),
+        }
+    }
+}
+impl<T, const M: usize, const N: usize, const RN: usize> Mul<Matrix<T, N, RN>> for Matrix<T, M, N>
+where
+    Self: ScalarOp,
+    T: Default + Mul<Output = T> + Add<Output = T> + Copy,
+{
+    type Output = Matrix<T, M, RN>;
+
+    fn mul(self, rhs: Matrix<T, N, RN>) -> Self::Output {
+        Matrix::<T, M, RN>::from(std::array::from_fn(|i| {
+            std::array::from_fn(|j| {
+                (0..N).fold(T::default(), |acc, k| acc + self[i][k] * rhs[k][j])
+            })
+        }))
     }
 }
