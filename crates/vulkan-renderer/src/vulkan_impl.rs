@@ -1,6 +1,6 @@
 use crate::{
-    FlowControl, MAX_FRAMES_IN_FLIGHT, VulkanBufferData, VulkanPipelineData, VulkanRenderer,
-    VulkanRendererError, VulkanShaderData,
+    FlowControl, MAX_FRAMES_IN_FLIGHT, ProgramData, VulkanBufferData, VulkanPipelineData,
+    VulkanRenderer, VulkanRendererError, VulkanShaderData,
 };
 use ash::vk::{self, Handle, TaggedStructure};
 use renderer131::{
@@ -9,6 +9,7 @@ use renderer131::{
     ShaderHandle,
 };
 use std::{
+    collections::HashSet,
     ffi::CString,
     hash::{DefaultHasher, Hash, Hasher},
     ptr::{null, null_mut},
@@ -107,12 +108,60 @@ impl VulkanRenderer {
         hash as usize
     }
 
+    unsafe fn destroy_pipeline(
+        &mut self,
+        pipeline_id: usize,
+        ignore_buffer: Option<BufferHandle>,
+        ignore_program: Option<ProgramHandle>,
+    ) -> Result<(), VulkanRendererError> {
+        unsafe {
+            let pipeline = self.pipelines.get(&pipeline_id).ok_or_else(|| {
+                VulkanRendererError::VulkanError(format!(
+                    "Pipeline {pipeline_id} doesn't exist, so it cannot be destroyed"
+                ))
+            })?;
+
+            for program_handle in &pipeline.associated_programs {
+                if ignore_program.is_some_and(|program| program == *program_handle) {
+                    continue;
+                }
+                let program = self.programs.get_mut(program_handle).ok_or_else(|| {
+                    VulkanRendererError::VulkanError(format!(
+                        "Program {program_handle:?} doesn't exist"
+                    ))
+                })?;
+
+                program.associated_pipelines.remove(&pipeline_id);
+            }
+            for buffer_handle in &pipeline.associated_buffers {
+                if ignore_buffer.is_some_and(|buffer| buffer == *buffer_handle) {
+                    continue;
+                }
+                let buffer = self.buffers.get_mut(*buffer_handle).ok_or_else(|| {
+                    VulkanRendererError::VulkanError(format!(
+                        "Buffer {buffer_handle:?} doesn't exist"
+                    ))
+                })?;
+
+                buffer.associated_pipelines.remove(&pipeline_id);
+            }
+
+            self.device.destroy_pipeline(pipeline.pipeline, None);
+            self.device.destroy_pipeline_layout(pipeline.layout, None);
+            self.pipelines.remove(&pipeline_id);
+
+            Ok(())
+        }
+    }
     unsafe fn get_or_create_pipeline(
         &mut self,
         program: ProgramHandle,
         vertex_buffers: &[BufferHandle],
     ) -> Result<usize, VulkanRendererError> {
-        let (shaders, pipelines) = self.programs.get_mut(&program).ok_or_else(|| {
+        let ProgramData {
+            shaders,
+            associated_pipelines,
+        } = self.programs.get_mut(&program).ok_or_else(|| {
             VulkanRendererError::VulkanError(format!("Program {program:?} doesn't exist"))
         })?;
 
@@ -124,7 +173,7 @@ impl VulkanRenderer {
 
         let shaders = shaders.clone();
 
-        pipelines.push(hash);
+        associated_pipelines.insert(hash);
         let pipeline = unsafe { self.create_pipeline_and_dynamic_state(&shaders, vertex_buffers)? };
         self.pipelines.insert(hash, pipeline);
 
@@ -337,6 +386,9 @@ impl VulkanRenderer {
         Ok(VulkanPipelineData {
             pipeline,
             layout: pipeline_layout,
+
+            associated_programs: HashSet::default(),
+            associated_buffers: HashSet::default(),
         })
     }
 
@@ -410,8 +462,13 @@ impl VulkanRenderer {
                 "Program {program:?} already exists"
             )));
         }
-        self.programs
-            .insert(program, (shaders.to_vec(), Vec::default()));
+        self.programs.insert(
+            program,
+            ProgramData {
+                shaders: shaders.to_vec(),
+                associated_pipelines: HashSet::default(),
+            },
+        );
 
         Ok(program)
     }
@@ -419,21 +476,18 @@ impl VulkanRenderer {
         &mut self,
         program: ProgramHandle,
     ) -> Result<(), VulkanRendererError> {
-        let (_shaders, pipelines) = self.programs.get(&program).ok_or_else(|| {
-            VulkanRendererError::VulkanError(format!("Program {program:?} doesn't exist"))
-        })?;
+        let associated_pipelines = self
+            .programs
+            .get(&program)
+            .ok_or_else(|| {
+                VulkanRendererError::VulkanError(format!("Program {program:?} doesn't exist"))
+            })?
+            .associated_pipelines
+            .clone();
 
         unsafe {
-            for pipeline_id in pipelines {
-                let pipeline = self.pipelines.get(pipeline_id).ok_or_else(|| {
-                    VulkanRendererError::VulkanError(format!(
-                        "Pipeline {pipeline_id}, referenced by program {program:?} doesn't exist"
-                    ))
-                })?;
-
-                self.device.destroy_pipeline(pipeline.pipeline, None);
-                self.device.destroy_pipeline_layout(pipeline.layout, None);
-                self.pipelines.remove(pipeline_id);
+            for pipeline_id in associated_pipelines {
+                self.destroy_pipeline(pipeline_id, None, Some(program))?;
             }
         }
 
@@ -724,6 +778,8 @@ impl VulkanRenderer {
                 buffer,
                 device_memory,
                 index_elements: data.item_count,
+
+                associated_pipelines: HashSet::default(),
             });
 
             Ok(buffer_handle)
@@ -732,14 +788,18 @@ impl VulkanRenderer {
 
     pub(crate) unsafe fn destroy_buffer_impl(
         &mut self,
-        buffer: BufferHandle,
+        buffer_handle: BufferHandle,
     ) -> Result<(), VulkanRendererError> {
         let buffer = self
             .buffers
-            .remove(buffer)
-            .ok_or_else(|| VulkanRendererError::NonexistantBuffer(buffer))?;
+            .remove(buffer_handle)
+            .ok_or_else(|| VulkanRendererError::NonexistantBuffer(buffer_handle))?;
 
         unsafe {
+            for pipeline_id in buffer.associated_pipelines {
+                self.destroy_pipeline(pipeline_id, Some(buffer_handle), None)?;
+            }
+
             self.device.destroy_buffer(buffer.buffer, None);
             self.device.free_memory(buffer.device_memory, None);
         }

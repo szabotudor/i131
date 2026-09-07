@@ -10,7 +10,7 @@ use renderer131::{
     Renderer, RendererInstanceError, Settings, ShaderCreateInfo, ShaderHandle, ShaderStage,
 };
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     ffi::{CString, NulError, c_void},
     sync::{Arc, RwLock},
 };
@@ -168,6 +168,11 @@ struct SwapchainData {
     framebuffers: Vec<vk::Framebuffer>,
 }
 
+struct ProgramData {
+    shaders: Vec<ShaderHandle>,
+
+    associated_pipelines: HashSet<usize>,
+}
 struct VulkanShaderData {
     shader_module: vk::ShaderModule,
     stage: ShaderStage,
@@ -185,10 +190,15 @@ struct VulkanBufferData {
     buffer: vk::Buffer,
     device_memory: vk::DeviceMemory,
     index_elements: usize,
+
+    associated_pipelines: HashSet<usize>,
 }
 struct VulkanPipelineData {
     pipeline: vk::Pipeline,
     layout: vk::PipelineLayout,
+
+    associated_programs: HashSet<ProgramHandle>,
+    associated_buffers: HashSet<BufferHandle>,
 }
 
 struct FlowControl {
@@ -219,7 +229,7 @@ pub struct VulkanRenderer {
 
     /// Map of Program( `Hash<shaders>` ) to associated Pipelines( `[Hash<shaders+settings>]` )
     /// Each program can have multiple pipelines
-    programs: HashMap<ProgramHandle, (Vec<ShaderHandle>, Vec<usize>)>,
+    programs: HashMap<ProgramHandle, ProgramData>,
     pipelines: HashMap<usize, VulkanPipelineData>,
     render_pass: vk::RenderPass,
     shaders: HandleMap<ShaderHandle, VulkanShaderData>,
