@@ -1,4 +1,7 @@
-use crate::{ScalarOp, Vector};
+use crate::{
+    ScalarOp, Vector,
+    util::{Identity, min},
+};
 use std::{
     fmt::Debug,
     ops::{Deref, DerefMut},
@@ -34,6 +37,22 @@ impl<T, const N: usize> Matrix<T, 4, N> {
         Self {
             rows: Vector::<_, 4>::new(row0, row1, row2, row3),
         }
+    }
+}
+
+impl<T, const M: usize, const N: usize> Identity for Matrix<T, M, N>
+where
+    T: Default + Identity,
+    Vector<Vector<T, N>, M>: Default,
+{
+    fn ident() -> Self {
+        let mut rows = Vector::default();
+
+        for i in 0..(min(M, N)) {
+            rows[i][i] = T::ident();
+        }
+
+        Self { rows }
     }
 }
 
