@@ -59,7 +59,11 @@ impl Editor {
             "I131_VulkanBackend",
             (1, 3, 0),
             window.as_ref(),
-            ValidationLevel::Normal,
+            if cfg!(debug_assertions) {
+                ValidationLevel::Normal
+            } else {
+                ValidationLevel::NoValidation
+            },
         )?;
 
         let viewport_resize = Rc::new(RefCell::new(None));
