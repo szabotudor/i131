@@ -12,7 +12,20 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  deps:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          libglfw3-dev \
+          libvulkan-dev \
+          vulkan-validationlayers \
+          glslc
+  
   check-lint:
+    needs: deps
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -20,6 +33,7 @@ jobs:
       run: cargo fmt --check
 
   clippy:
+    needs: deps
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -27,6 +41,7 @@ jobs:
       run: cargo clippy
 
   build:
+    needs: deps
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
