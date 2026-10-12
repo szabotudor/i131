@@ -5,9 +5,8 @@ runs:
   using: composite
   steps:
     - name: Install Rust toolchain components
-      uses: dtolnay/rust-toolchain@master
-      with:
-        components: rustfmt, clippy
+      shell: bash
+      run: rustup component add rustfmt clippy
 
     - name: Install system dependencies
       shell: bash
