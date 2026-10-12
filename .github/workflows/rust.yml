@@ -12,9 +12,9 @@ jobs:
   deps:
     runs-on: ubuntu-latest
     steps:
-    - uses: dtolnay/rust-toolchain@stable
-      with:
-        components: rustfmt, clippy
+    - uses: actions/checkout@v4
+    - name: Rust dependencies
+      run: rustup component add rustfmt clippy
     - name: Install system dependencies
       run: |
         sudo apt-get update
@@ -23,13 +23,13 @@ jobs:
           libvulkan-dev \
           vulkan-validationlayers \
           glslc \
-          libwayland-dev
+          libwayland-dev \
+          libwayland-bin
   
   check-lint:
     needs: deps
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
     - name: Check Lint
       run: cargo fmt --check
 
