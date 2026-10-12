@@ -6,8 +6,9 @@ use raw_window_handle::HandleError;
 #[cfg(feature = "GLFW")]
 use renderer131::RendererError;
 use renderer131::{
-    BufferCreateInfo, BufferFieldFormat, BufferHandle, BufferUsage, DrawCall, ProgramHandle,
-    Renderer, RendererInstanceError, Settings, ShaderCreateInfo, ShaderHandle, ShaderStage,
+    BufferCreateInfo, BufferFieldFormat, BufferHandle, BufferUsage, DrawCall,
+    ExecutionContextHandle, ProgramHandle, Renderer, RendererInstanceError, Settings,
+    ShaderCreateInfo, ShaderHandle, ShaderStage,
 };
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -54,6 +55,9 @@ pub enum VulkanRendererError {
 
     #[error("Chosen devise is missing required queue family support for \"{0}\"")]
     MissingQueue(String),
+
+    #[error("Execution context handle {0:?} doesn't exist")]
+    NonexistantExecutionContext(ExecutionContextHandle),
 
     #[error("Shader handle {0:?} doesn't exist")]
     NonexistantShader(ShaderHandle),
@@ -134,10 +138,6 @@ struct DeviceQueues {
     graphics: Option<vk::Queue>,
     present: Option<vk::Queue>,
 }
-struct CommandPools {
-    graphics: vk::CommandPool,
-    utility: vk::CommandPool,
-}
 struct InstanceExtensions {
     create_debug_utils_messenger_ext: Option<vk::PFN_vkCreateDebugUtilsMessengerEXT>,
     destroy_debug_utils_messenger_ext: Option<vk::PFN_vkDestroyDebugUtilsMessengerEXT>,
@@ -201,12 +201,14 @@ struct VulkanPipelineData {
     associated_buffers: HashSet<BufferHandle>,
 }
 
-struct FlowControl {
+#[derive(Debug, Clone, Copy)]
+struct ExecutionContext {
+    command_pool: vk::CommandPool,
+    command_buffer: vk::CommandBuffer,
+
     image_available_semaphore: vk::Semaphore,
     render_finished_semaphore: vk::Semaphore,
-    in_flight_fence: vk::Fence,
-
-    utility_fence: vk::Fence,
+    fence: vk::Fence,
 }
 
 pub struct VulkanRenderer {
@@ -220,12 +222,13 @@ pub struct VulkanRenderer {
     device: Device,
     device_queues: DeviceQueues,
     queue_family_indices: QueueFamilyIndices,
-    command_pools: CommandPools,
-    command_buffers: HashMap<vk::CommandPool, Vec<vk::CommandBuffer>>,
+    contexts: HandleMap<ExecutionContextHandle, ExecutionContext>,
     swapchain_details: SwapchainSupportDetails,
     swapchain: SwapchainData,
     surface: vk::SurfaceKHR,
     debug_messenger: Option<DebugMessengerData>,
+
+    utility_context: ExecutionContextHandle,
 
     /// Map of Program( `Hash<shaders>` ) to associated Pipelines( `[Hash<shaders+settings>]` )
     /// Each program can have multiple pipelines
@@ -236,16 +239,11 @@ pub struct VulkanRenderer {
     buffers: HandleMap<BufferHandle, VulkanBufferData>,
     settings: Settings,
 
-    flow_control: HashMap<vk::CommandBuffer, FlowControl>,
-    current_frame: usize,
-
     buffer_bindings: usize,
     freed_buffer_bindings: VecDeque<usize>,
 }
 unsafe impl Send for VulkanRenderer {}
 unsafe impl Sync for VulkanRenderer {}
-
-pub(crate) const MAX_FRAMES_IN_FLIGHT: u32 = 2;
 
 impl VulkanRenderer {
     #[cfg(feature = "GLFW")]
@@ -267,6 +265,19 @@ impl VulkanRenderer {
 impl Renderer for VulkanRenderer {
     fn name(&self) -> &'static str {
         "Vulkan"
+    }
+    fn max_execution_contexts(&self) -> usize {
+        usize::MAX
+    }
+
+    fn create_execution_context(&mut self) -> Result<ExecutionContextHandle, RendererError> {
+        unsafe { Ok(self.create_execution_context_impl()?) }
+    }
+    fn destroy_execution_context(
+        &mut self,
+        context: ExecutionContextHandle,
+    ) -> Result<(), RendererError> {
+        unsafe { Ok(self.destroy_execution_context_impl(context)?) }
     }
 
     fn destroy(&mut self) -> Result<(), RendererError> {
@@ -311,8 +322,12 @@ impl Renderer for VulkanRenderer {
         unsafe { Ok(self.destroy_buffer_impl(vertex_buffer)?) }
     }
 
-    fn execute(&mut self, draw_call: DrawCall) -> Result<(), RendererError> {
-        unsafe { Ok(self.execute_impl(draw_call)?) }
+    fn execute(
+        &mut self,
+        draw_call: DrawCall,
+        context: ExecutionContextHandle,
+    ) -> Result<(), RendererError> {
+        unsafe { Ok(self.execute_impl(draw_call, context)?) }
     }
 
     fn change_settings(

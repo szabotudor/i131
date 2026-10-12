@@ -1,12 +1,12 @@
 use crate::{
-    FlowControl, MAX_FRAMES_IN_FLIGHT, ProgramData, VulkanBufferData, VulkanPipelineData,
-    VulkanRenderer, VulkanRendererError, VulkanShaderData,
+    ExecutionContext, ProgramData, VulkanBufferData, VulkanPipelineData, VulkanRenderer,
+    VulkanRendererError, VulkanShaderData,
 };
 use ash::vk::{self, Handle, TaggedStructure};
 use renderer131::{
     BufferBinding, BufferCreateInfo, BufferFieldFormat, BufferHandle, BufferUsage,
-    ComponentBitCount, DrawCall, DrawMode, ProgramHandle, ScalarKind, Settings, ShaderCreateInfo,
-    ShaderHandle,
+    ComponentBitCount, DrawCall, DrawMode, ExecutionContextHandle, ProgramHandle, ScalarKind,
+    Settings, ShaderCreateInfo, ShaderHandle,
 };
 use std::{
     collections::HashSet,
@@ -392,6 +392,101 @@ impl VulkanRenderer {
         })
     }
 
+    pub(crate) unsafe fn create_execution_context_impl(
+        &mut self,
+    ) -> Result<ExecutionContextHandle, VulkanRendererError> {
+        unsafe {
+            let command_pool_create_info = vk::CommandPoolCreateInfo {
+                s_type: vk::CommandPoolCreateInfo::STRUCTURE_TYPE,
+                queue_family_index: self
+                    .queue_family_indices
+                    .graphics
+                    .ok_or_else(|| VulkanRendererError::MissingQueue("Graphics".to_string()))?,
+                flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+                ..Default::default()
+            };
+            let command_pool = self
+                .device
+                .create_command_pool(&command_pool_create_info, None)?;
+
+            let command_buffer_allocate_info = vk::CommandBufferAllocateInfo {
+                s_type: vk::CommandBufferAllocateInfo::STRUCTURE_TYPE,
+                command_pool,
+                command_buffer_count: 1,
+                level: vk::CommandBufferLevel::PRIMARY,
+                ..Default::default()
+            };
+            let command_buffer = self
+                .device
+                .allocate_command_buffers(&command_buffer_allocate_info)?
+                .drain(..)
+                .next()
+                .ok_or_else(|| {
+                    VulkanRendererError::VulkanError(
+                        "Expected command buffer allocation to allocate 1 command buffer"
+                            .to_string(),
+                    )
+                })?;
+
+            let semaphore_create_info = vk::SemaphoreCreateInfo {
+                s_type: vk::SemaphoreCreateInfo::STRUCTURE_TYPE,
+                ..Default::default()
+            };
+
+            let image_available_semaphore =
+                self.device.create_semaphore(&semaphore_create_info, None)?;
+            let render_finished_semaphore =
+                self.device.create_semaphore(&semaphore_create_info, None)?;
+
+            let fence_create_info = vk::FenceCreateInfo {
+                s_type: vk::FenceCreateInfo::STRUCTURE_TYPE,
+                flags: vk::FenceCreateFlags::SIGNALED,
+                ..Default::default()
+            };
+            let fence = self.device.create_fence(&fence_create_info, None)?;
+
+            let context = ExecutionContext {
+                command_pool,
+                command_buffer,
+
+                image_available_semaphore,
+                render_finished_semaphore,
+                fence,
+            };
+            let context_handle = self.contexts.insert(context);
+
+            Ok(context_handle)
+        }
+    }
+    pub(crate) unsafe fn destroy_execution_context_impl(
+        &mut self,
+        context_handle: ExecutionContextHandle,
+    ) -> Result<(), VulkanRendererError> {
+        unsafe {
+            let context = self
+                .contexts
+                .get(context_handle)
+                .ok_or_else(|| VulkanRendererError::NonexistantExecutionContext(context_handle))?;
+
+            self.device
+                .wait_for_fences(&[context.fence], true, u64::MAX)?;
+
+            let context = self
+                .contexts
+                .remove(context_handle)
+                .ok_or_else(|| VulkanRendererError::NonexistantExecutionContext(context_handle))?;
+
+            self.device.destroy_fence(context.fence, None);
+            self.device
+                .destroy_semaphore(context.render_finished_semaphore, None);
+            self.device
+                .destroy_semaphore(context.image_available_semaphore, None);
+            self.device.destroy_command_pool(context.command_pool, None);
+
+            Ok(())
+        }
+    }
+
     pub(crate) unsafe fn create_shaders_impl(
         &mut self,
         infos: &[ShaderCreateInfo],
@@ -705,27 +800,13 @@ impl VulkanRenderer {
             // Copy staging buffer to real buffer
             //
 
-            let utility_command_buffer = self
-                .command_buffers
-                .get(&self.command_pools.utility)
-                .and_then(|v| v.iter().next().copied())
-                .ok_or_else(|| {
-                    VulkanRendererError::VulkanError(
-                        "Utility command buffer doesn't exist".to_string(),
-                    )
-                })?;
+            let utility_context = self.contexts.get(self.utility_context).ok_or_else(|| {
+                VulkanRendererError::NonexistantExecutionContext(self.utility_context)
+            })?;
 
-            let utility_fence = self
-                .flow_control
-                .get(&utility_command_buffer)
-                .ok_or_else(|| {
-                    VulkanRendererError::VulkanError(
-                        "Flow control doesn't exist for expected command buffer".to_string(),
-                    )
-                })?
-                .utility_fence;
-
-            self.device.reset_fences(&[utility_fence])?;
+            self.device
+                .wait_for_fences(&[utility_context.fence], true, u64::MAX)?;
+            self.device.reset_fences(&[utility_context.fence])?;
 
             let temp_begin_info = vk::CommandBufferBeginInfo {
                 s_type: vk::CommandBufferBeginInfo::STRUCTURE_TYPE,
@@ -733,11 +814,16 @@ impl VulkanRenderer {
                 ..Default::default()
             };
 
+            self.device.reset_command_buffer(
+                utility_context.command_buffer,
+                vk::CommandBufferResetFlags::default(),
+            )?;
+
             self.device
-                .begin_command_buffer(utility_command_buffer, &temp_begin_info)?;
+                .begin_command_buffer(utility_context.command_buffer, &temp_begin_info)?;
 
             self.device.cmd_copy_buffer(
-                utility_command_buffer,
+                utility_context.command_buffer,
                 staging_buffer,
                 buffer,
                 &[vk::BufferCopy {
@@ -747,24 +833,24 @@ impl VulkanRenderer {
                 }],
             );
 
-            self.device.end_command_buffer(utility_command_buffer)?;
+            self.device
+                .end_command_buffer(utility_context.command_buffer)?;
 
             let temp_submit_info = vk::SubmitInfo {
                 s_type: vk::SubmitInfo::STRUCTURE_TYPE,
                 command_buffer_count: 1,
-                p_command_buffers: &utility_command_buffer,
+                p_command_buffers: &utility_context.command_buffer,
                 ..Default::default()
             };
 
             self.device.queue_submit(
                 self.device_queues.graphics.unwrap(),
                 &[temp_submit_info],
-                utility_fence,
+                utility_context.fence,
             )?;
 
             self.device
-                .wait_for_fences(&[utility_fence], true, u64::MAX)?;
-            self.device.reset_fences(&[utility_fence])?;
+                .wait_for_fences(&[utility_context.fence], true, u64::MAX)?;
 
             self.device.destroy_buffer(staging_buffer, None);
             self.device.free_memory(staging_device_memory, None);
@@ -957,35 +1043,24 @@ impl VulkanRenderer {
         program: ProgramHandle,
         buffers: &[BufferHandle],
         draw_mode: DrawMode,
+        context: ExecutionContextHandle,
     ) -> Result<(), VulkanRendererError> {
         unsafe {
-            let command_buffers = self
-                .command_buffers
-                .get(&self.command_pools.graphics)
-                .ok_or_else(|| {
-                    VulkanRendererError::VulkanError(
-                        "Expected graphics command pool to exist".to_string(),
-                    )
-                })?;
-            let command_buffer = command_buffers[self.current_frame];
-
-            let FlowControl {
+            let Some(ExecutionContext {
+                #[expect(unused_variables, reason = "Not needed here")]
+                command_pool,
+                command_buffer,
                 image_available_semaphore,
                 render_finished_semaphore,
-                in_flight_fence,
-
-                #[expect(unused_variables, reason = "No utility operations during execute")]
-                utility_fence,
-            } = *self.flow_control.get(&command_buffer).ok_or_else(|| {
-                VulkanRendererError::VulkanError(
-                    "Flow control doesn't exist for expected command buffer".to_string(),
-                )
-            })?;
+                fence,
+            }) = self.contexts.get(context).copied()
+            else {
+                return Err(VulkanRendererError::NonexistantExecutionContext(context));
+            };
 
             self.device.device_wait_idle()?;
 
-            self.device
-                .wait_for_fences(&[in_flight_fence], true, u64::MAX)?;
+            self.device.wait_for_fences(&[fence], true, u64::MAX)?;
 
             if let Some(new_size) = self.framebuffer_resized {
                 self.recreate_swapchain()?;
@@ -1017,7 +1092,7 @@ impl VulkanRenderer {
                 },
             }
 
-            self.device.reset_fences(&[in_flight_fence])?;
+            self.device.reset_fences(&[fence])?;
 
             let pipeline = self.get_or_create_pipeline(program, buffers)?;
             let pipeline = self.pipelines.get(&pipeline).ok_or_else(|| {
@@ -1054,7 +1129,7 @@ impl VulkanRenderer {
                 // By now this should already be verified to exist
                 self.device_queues.graphics.unwrap(),
                 &[submit_info],
-                in_flight_fence,
+                fence,
             )?;
 
             let present_info = vk::PresentInfoKHR {
@@ -1083,8 +1158,6 @@ impl VulkanRenderer {
                 },
             }
 
-            self.current_frame = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT as usize;
-
             Ok(())
         }
     }
@@ -1092,6 +1165,7 @@ impl VulkanRenderer {
     pub(crate) unsafe fn execute_impl(
         &mut self,
         draw_call: DrawCall,
+        context: ExecutionContextHandle,
     ) -> Result<(), VulkanRendererError> {
         match draw_call {
             DrawCall::Draw {
@@ -1099,7 +1173,7 @@ impl VulkanRenderer {
                 buffers,
                 mode,
             } => {
-                unsafe { self.execute_draw_impl(program, &buffers, mode)? };
+                unsafe { self.execute_draw_impl(program, &buffers, mode, context)? };
             }
         }
 

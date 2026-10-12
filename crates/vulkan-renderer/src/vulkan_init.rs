@@ -1,9 +1,8 @@
 #[cfg(feature = "GLFW")]
 use crate::SwapchainData;
 use crate::{
-    CommandPools, DebugMessengerData, DebugMessengerUserData, DeviceQueues, FlowControl,
-    InstanceExtensions, MAX_FRAMES_IN_FLIGHT, QueueFamilyIndices, ValidationLevel, VulkanRenderer,
-    VulkanRendererError,
+    DebugMessengerData, DebugMessengerUserData, DeviceQueues, ExecutionContext, InstanceExtensions,
+    QueueFamilyIndices, ValidationLevel, VulkanRenderer, VulkanRendererError,
 };
 use ash::{
     Device, Entry, Instance,
@@ -16,7 +15,6 @@ use raw_window_handle::{Win32WindowHandle, WindowsDisplayHandle};
 #[cfg(feature = "GLFW")]
 use renderer131::Viewport;
 use std::{
-    collections::HashMap,
     ffi::{CStr, CString, c_void},
     ptr::{null, null_mut},
     str::FromStr,
@@ -56,8 +54,6 @@ struct CreateDeviceResult {
     device: Device,
     queue_family_indices: QueueFamilyIndices,
     device_queues: DeviceQueues,
-    command_pools: CommandPools,
-    command_buffers: HashMap<vk::CommandPool, Vec<vk::CommandBuffer>>,
     swapchain_details: SwapchainSupportDetails,
 }
 
@@ -630,40 +626,6 @@ impl VulkanRenderer {
         }
     }
 
-    unsafe fn create_command_pools(
-        device: &Device,
-        queue_family_indices: &QueueFamilyIndices,
-    ) -> Result<CommandPools, VulkanRendererError> {
-        unsafe {
-            let graphics_queue_family_index = queue_family_indices.graphics.ok_or_else(|| {
-                VulkanRendererError::VulkanError("Graphics queue family doesn't exist".to_string())
-            })?;
-
-            let graphics_command_pool_create_info = vk::CommandPoolCreateInfo {
-                s_type: vk::CommandPoolCreateInfo::STRUCTURE_TYPE,
-                flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-                queue_family_index: graphics_queue_family_index,
-                ..Default::default()
-            };
-            let graphics_command_pool =
-                device.create_command_pool(&graphics_command_pool_create_info, None)?;
-
-            let utility_command_pool_create_info = vk::CommandPoolCreateInfo {
-                s_type: vk::CommandPoolCreateInfo::STRUCTURE_TYPE,
-                flags: vk::CommandPoolCreateFlags::TRANSIENT,
-                queue_family_index: graphics_queue_family_index,
-                ..Default::default()
-            };
-            let utility_command_pool =
-                device.create_command_pool(&utility_command_pool_create_info, None)?;
-
-            Ok(CommandPools {
-                graphics: graphics_command_pool,
-                utility: utility_command_pool,
-            })
-        }
-    }
-
     unsafe fn create_device(
         instance: &Instance,
         instance_extensions: &InstanceExtensions,
@@ -781,41 +743,11 @@ impl VulkanRenderer {
                         .map(|idx| device.get_device_queue(idx, 0)),
                 };
 
-                let command_pools =
-                    Self::create_command_pools(&device, &suitability.queue_family_indices)?;
-                let mut command_buffers = HashMap::default();
-
-                let command_buffer_alloc_info = vk::CommandBufferAllocateInfo {
-                    s_type: vk::CommandBufferAllocateInfo::STRUCTURE_TYPE,
-                    command_pool: command_pools.graphics,
-                    level: vk::CommandBufferLevel::PRIMARY,
-                    command_buffer_count: MAX_FRAMES_IN_FLIGHT,
-                    ..Default::default()
-                };
-                command_buffers.insert(
-                    command_pools.graphics,
-                    device.allocate_command_buffers(&command_buffer_alloc_info)?,
-                );
-
-                let utility_command_buffer_alloc_info = vk::CommandBufferAllocateInfo {
-                    s_type: vk::CommandBufferAllocateInfo::STRUCTURE_TYPE,
-                    level: vk::CommandBufferLevel::PRIMARY,
-                    command_pool: command_pools.graphics,
-                    command_buffer_count: 1,
-                    ..Default::default()
-                };
-                command_buffers.insert(
-                    command_pools.utility,
-                    device.allocate_command_buffers(&utility_command_buffer_alloc_info)?,
-                );
-
                 Ok(CreateDeviceResult {
                     physical_device,
                     device,
                     queue_family_indices: suitability.queue_family_indices,
                     device_queues,
-                    command_pools,
-                    command_buffers,
                     swapchain_details: suitability.swapchain_details,
                 })
             } else {
@@ -1128,48 +1060,6 @@ impl VulkanRenderer {
         Ok(render_pass)
     }
 
-    fn create_flow_control(
-        device: &Device,
-        command_buffers: &[vk::CommandBuffer],
-    ) -> Result<HashMap<vk::CommandBuffer, FlowControl>, VulkanRendererError> {
-        unsafe {
-            let mut flows = HashMap::<vk::CommandBuffer, FlowControl>::default();
-
-            for command_buffer in command_buffers {
-                let semaphore_create_info = vk::SemaphoreCreateInfo {
-                    s_type: vk::SemaphoreCreateInfo::STRUCTURE_TYPE,
-                    ..Default::default()
-                };
-                let fence_create_info = vk::FenceCreateInfo {
-                    s_type: vk::FenceCreateInfo::STRUCTURE_TYPE,
-                    flags: vk::FenceCreateFlags::SIGNALED,
-                    ..Default::default()
-                };
-
-                let image_available_semaphore =
-                    device.create_semaphore(&semaphore_create_info, None)?;
-                let render_finished_semaphore =
-                    device.create_semaphore(&semaphore_create_info, None)?;
-
-                let in_flight_fence = device.create_fence(&fence_create_info, None)?;
-                let utility_fence = device.create_fence(&fence_create_info, None)?;
-
-                flows.insert(
-                    *command_buffer,
-                    FlowControl {
-                        image_available_semaphore,
-                        render_finished_semaphore,
-                        in_flight_fence,
-
-                        utility_fence,
-                    },
-                );
-            }
-
-            Ok(flows)
-        }
-    }
-
     #[cfg(feature = "GLFW")]
     pub fn new_glfw_impl(
         name: &str,
@@ -1179,7 +1069,7 @@ impl VulkanRenderer {
     ) -> Result<Self, VulkanRendererError> {
         unsafe {
             use math131::Vec2u32;
-            use renderer131::Settings;
+            use renderer131::{ExecutionContextHandle, Settings};
             use std::collections::{HashMap, VecDeque};
             use utils131::HandleMap;
 
@@ -1215,22 +1105,10 @@ impl VulkanRenderer {
                 device,
                 queue_family_indices,
                 device_queues,
-                command_pools,
-                command_buffers,
                 swapchain_details,
             } = Self::create_device(&instance, &instance_extensions, surface)?;
 
             let render_pass = Self::create_render_pass(&device, swapchain_details.format)?;
-
-            let flow_control = Self::create_flow_control(
-                &device,
-                &command_buffers
-                    .iter()
-                    .fold(Vec::default(), |mut acc, (_, buffers)| {
-                        acc.extend_from_slice(buffers);
-                        acc
-                    }),
-            )?;
 
             let mut renderer = Self {
                 framebuffer_resized: None,
@@ -1243,12 +1121,13 @@ impl VulkanRenderer {
                 device,
                 device_queues,
                 queue_family_indices,
-                command_pools,
-                command_buffers,
+                contexts: HandleMap::default(),
                 swapchain_details,
                 swapchain: SwapchainData::default(),
                 surface,
                 debug_messenger,
+
+                utility_context: ExecutionContextHandle::null(),
 
                 programs: HashMap::default(),
                 pipelines: HashMap::default(),
@@ -1256,9 +1135,6 @@ impl VulkanRenderer {
                 shaders: HandleMap::default(),
                 buffers: HandleMap::default(),
                 settings: Settings::default(),
-
-                flow_control,
-                current_frame: 0,
 
                 buffer_bindings: 0,
                 freed_buffer_bindings: VecDeque::default(),
@@ -1268,6 +1144,8 @@ impl VulkanRenderer {
             renderer.settings.viewport.size =
                 Vec2u32::new(framebuffer_size.0 as u32, framebuffer_size.1 as u32);
             renderer.recreate_swapchain()?;
+
+            renderer.utility_context = renderer.create_execution_context_impl()?;
 
             Ok(renderer)
         }
@@ -1342,28 +1220,26 @@ impl VulkanRenderer {
         self.debug_messenger = None;
 
         unsafe {
-            for (_command_buffer, flow_control) in self.flow_control.drain() {
-                let FlowControl {
+            for (_command_buffer, context) in self.contexts.iter() {
+                let ExecutionContext {
+                    command_pool,
+                    command_buffer: _,
                     image_available_semaphore,
                     render_finished_semaphore,
-                    in_flight_fence,
+                    fence,
+                } = *context;
 
-                    utility_fence,
-                } = flow_control;
+                self.device.wait_for_fences(&[fence], true, u64::MAX)?;
 
                 self.device
                     .destroy_semaphore(image_available_semaphore, None);
                 self.device
                     .destroy_semaphore(render_finished_semaphore, None);
-                self.device.destroy_fence(in_flight_fence, None);
-                self.device.destroy_fence(utility_fence, None);
-            }
+                self.device.destroy_fence(fence, None);
 
-            self.device
-                .destroy_command_pool(self.command_pools.graphics, None);
-            self.device
-                .destroy_command_pool(self.command_pools.utility, None);
-            self.command_buffers.clear();
+                self.device.destroy_command_pool(command_pool, None);
+            }
+            self.contexts.clear();
 
             for pipeline in self.pipelines.values() {
                 self.device.destroy_pipeline(pipeline.pipeline, None);

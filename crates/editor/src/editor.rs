@@ -1,11 +1,10 @@
-use std::{cell::RefCell, mem::offset_of, rc::Rc};
-
+use crate::shaders_vulkan;
 use engine131::{
     math131::{Vec2f32, Vec2u32, Vec3f32},
     renderer131::{
         BufferBinding, BufferCreateInfo, BufferFieldFormat, BufferHandle, BufferUsage,
-        ComponentBitCount, DrawCall, DrawMode, ProgramHandle, Renderer, RendererError, ScalarKind,
-        ShaderCreateInfo, ShaderHandle, ShaderStage, Viewport,
+        ComponentBitCount, DrawCall, DrawMode, ExecutionContextHandle, ProgramHandle, Renderer,
+        RendererError, ScalarKind, ShaderCreateInfo, ShaderHandle, ShaderStage, Viewport,
     },
     systems::{System, SystemContext, SystemId},
     window131::{
@@ -13,10 +12,11 @@ use engine131::{
         WindowSettings,
     },
 };
+use std::{cell::RefCell, mem::offset_of, rc::Rc};
 use thiserror::Error;
 use vulkan_renderer::{ValidationLevel, VulkanRenderer};
 
-use crate::shaders_vulkan;
+const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
 #[derive(Error, Debug)]
 pub enum EditorError {
@@ -32,6 +32,9 @@ pub(crate) struct Editor {
     viewport_callback: CallbackHandle,
     viewport_resize: Rc<RefCell<Option<Vec2u32>>>,
     renderer: Box<dyn Renderer>,
+    render_contexts: [ExecutionContextHandle; MAX_FRAMES_IN_FLIGHT],
+    current_frame: usize,
+
     window: Box<dyn Window>,
     vert: ShaderHandle,
     frag: ShaderHandle,
@@ -55,7 +58,7 @@ impl Editor {
         // TODO: Implement system init arguments
         //
         // Needed to enable/disable validation here
-        let renderer = VulkanRenderer::new_glfw(
+        let mut renderer = VulkanRenderer::new_glfw(
             "I131_VulkanBackend",
             (1, 3, 0),
             window.as_ref(),
@@ -66,6 +69,12 @@ impl Editor {
             },
         )?;
 
+        let render_contexts = (0..MAX_FRAMES_IN_FLIGHT)
+            .map(|_| renderer.create_execution_context())
+            .collect::<Result<Vec<_>, RendererError>>()?
+            .try_into()
+            .map_err(|_| -> RendererError { unreachable!() })?;
+
         let viewport_resize = Rc::new(RefCell::new(None));
 
         Ok(Self {
@@ -74,6 +83,9 @@ impl Editor {
             viewport_resize,
             window,
             renderer: Box::new(renderer),
+            current_frame: 0,
+
+            render_contexts,
             vert: ShaderHandle::null(),
             frag: ShaderHandle::null(),
             prog: ProgramHandle::null(),
@@ -209,11 +221,16 @@ impl System for Editor {
             }))?;
         }
 
-        self.renderer.execute(DrawCall::Draw {
-            program: self.prog,
-            buffers: vec![self.vertices, self.indices],
-            mode: DrawMode::Indexed,
-        })?;
+        self.renderer.execute(
+            DrawCall::Draw {
+                program: self.prog,
+                buffers: vec![self.vertices, self.indices],
+                mode: DrawMode::Indexed,
+            },
+            self.render_contexts[self.current_frame],
+        )?;
+
+        self.current_frame = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
 
         Ok(())
     }

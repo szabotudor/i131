@@ -55,6 +55,8 @@ impl<T> OptionRendererError<T> for Option<T> {
     }
 }
 
+define_handle! {ExecutionContext}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 pub enum ShaderStage {
     Vertex,
@@ -232,6 +234,13 @@ where
     Self: Send + Sync,
 {
     fn name(&self) -> &'static str;
+    fn max_execution_contexts(&self) -> usize;
+
+    fn create_execution_context(&mut self) -> Result<ExecutionContextHandle, RendererError>;
+    fn destroy_execution_context(
+        &mut self,
+        context: ExecutionContextHandle,
+    ) -> Result<(), RendererError>;
 
     fn destroy(&mut self) -> Result<(), RendererError>;
 
@@ -249,7 +258,11 @@ where
     fn create_buffer(&mut self, data: BufferCreateInfo) -> Result<BufferHandle, RendererError>;
     fn destroy_buffer(&mut self, vertex_buffer: BufferHandle) -> Result<(), RendererError>;
 
-    fn execute(&mut self, draw_call: DrawCall) -> Result<(), RendererError>;
+    fn execute(
+        &mut self,
+        draw_call: DrawCall,
+        context: ExecutionContextHandle,
+    ) -> Result<(), RendererError>;
 
     fn change_settings(
         &mut self,
