@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    - uses: ./.github/workflows/setup-rust.yml
+    - uses: ./.github/actions/setup-rust
     
     - name: Check Lint
       run: cargo fmt --check
@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    - uses: ./.github/workflows/setup-rust.yml
+    - uses: ./.github/actions/setup-rust
     
     - name: Clippy
       run: cargo clippy
@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    - uses: ./.github/workflows/setup-rust.yml
+    - uses: ./.github/actions/setup-rust
     
     - name: Build
       run: cargo build --verbose
